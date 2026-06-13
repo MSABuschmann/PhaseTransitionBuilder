@@ -1,0 +1,29 @@
+# Reference codes (not part of this package)
+reference_codes/
+
+# C++ build artifacts
+cpp/*/build/
+cpp/*/*.o
+cpp/*/*.a
+cpp/*/*.so
+bin/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+
+# Jupyter
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# HDF5 outputs / simulation results
+results/
+*.h5
+
+# macOS
+.DS_Store
