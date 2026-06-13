@@ -8,6 +8,7 @@ from typing import Optional, Sequence
 import h5py
 import numpy as np
 from scipy.interpolate import interp1d
+from scipy.optimize import brentq
 
 
 # ---------------------------------------------------------------------------
@@ -19,9 +20,9 @@ class BubbleMasterParams:
     """
     All grid / physics parameters needed to run one BubbleMaster simulation.
 
-    Convention: gamma determines the initial bubble separation d = 2*gamma*r0,
-    where r0 = profile.rmid_0.  Everything else follows deterministically from
-    d, the potential mass scale M, and the resolution choices.
+    Convention: gamma is the wall Lorentz factor at the moment the outer walls
+    first touch.  The separation d is found by brentq in _two_bubble_ic so that
+    the wall-thinning ratio Gamma(t_coll) == gamma exactly.
     """
     # resolution
     dz:           float = 0.005
@@ -54,12 +55,25 @@ def _two_bubble_ic(profile, gamma: float, dz: float):
       - phi0  : corresponding combined field phi = sqrt(phi1^2 + phi2^2)
       - d     : centre-to-centre bubble separation
       - ds    : step size in s (Milne arc-length)
+
+    The separation d is chosen so that the wall Lorentz factor (wall-thinning
+    ratio) equals gamma exactly at the moment the outer walls first touch.
+    This is physically correct and eliminates the mismatch between the gamma
+    parameterisation and the Gamma() measurement for thick walls.
     """
-    r0  = profile.rmid_0
     r_out = profile.rout_0
     r_in  = profile.rin_0
+    w0    = r_out - r_in
 
-    d = 2.0 * gamma * r0
+    def _gamma_at_t(t):
+        return w0 / (np.sqrt(r_out**2 + t**2) - np.sqrt(r_in**2 + t**2))
+
+    if gamma <= 1.0:
+        t_coll = 0.0
+    else:
+        t_coll = brentq(lambda t: _gamma_at_t(t) - gamma,
+                        0., gamma * (r_out + r_in))
+    d  = 2.0 * np.sqrt(r_out**2 + t_coll**2)
     ds = dz * 0.2
 
     # Extend profile arrays for interpolation out to d

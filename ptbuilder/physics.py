@@ -302,7 +302,7 @@ class BubbleKinematics:
         separation d and nucleation times t0_nuc, t1_nuc.
         Both bubbles are assumed to have the same rout_0.
         """
-        R0 = self.profile.rmid_0
+        R0 = self.profile.rout_0
         dt = t0_nuc - t1_nuc
         disc = (d**2 - dt**2) * (d**2 - 4*R0**2 - dt**2)
         num  = (d * np.sqrt(disc)
