@@ -32,6 +32,7 @@ logs/
 
 # Cluster
 load.sh
+redo.sh
 
 # macOS
 .DS_Store
