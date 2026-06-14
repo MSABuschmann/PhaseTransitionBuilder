@@ -7,6 +7,7 @@
 #include <iostream>
 #include <omp.h>
 #include <stdexcept>
+#include <gsl/gsl_errno.h>
 
 // ---------------------------------------------------------------------------
 // Constructor
@@ -14,14 +15,14 @@
 
 Integrator::Integrator(const std::vector<std::vector<double>> &input_phi,
                        const Setup &setup)
-    : phi_(input_phi),
-      n_k_(setup.n_k), n_w_(setup.n_w),
+    : n_k_(setup.n_k), n_w_(setup.n_w),
       ds_(setup.ds * setup.how_often_ds),
       dz_(std::abs(setup.z[1] - setup.z[0])),
       t_cut_base_(setup.t_cut), t_m_base_(setup.t_m),
       t_max_base_(setup.t_max), t_0_(setup.t_0),
       d_(setup.d), cutoff_type_(setup.cutoff_type),
-      z_(setup.z), wlist_(setup.wlist), times_(setup.times)
+      z_(setup.z), wlist_(setup.wlist), times_(setup.times),
+      phi_(input_phi)
 {
     n_z_ = z_.size();
     n_s_ = phi_.size();
@@ -84,9 +85,7 @@ double Integrator::k_integral(double w, double eps_rel,
         double int_s_xandy_real = 0., int_s_xandy_imag = 0.;
         double int_s_xz_real    = 0., int_s_xz_imag    = 0.;
 
-#pragma omp parallel reduction(+:int_s_zz_real,int_s_zz_imag,\
-                                 int_s_xandy_real,int_s_xandy_imag,\
-                                 int_s_xz_real,int_s_xz_imag)
+#pragma omp parallel
         {
             gsl_set_error_handler_off();
             gsl_integration_workspace *ws =
