@@ -1,7 +1,6 @@
 #include <iostream>
 #include <string>
 
-#include "io.h"
 #include "solver.h"
 
 // Validation tool: evolve a single bubble radially and write output HDF5.
