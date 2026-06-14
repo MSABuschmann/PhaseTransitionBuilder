@@ -9,8 +9,7 @@ LIBS     = -L$(HDF5_LIB) -lhdf5_cpp -lhdf5 -lm
 
 SRCDIR   = src
 SRCS     = $(SRCDIR)/main.cpp \
-           $(SRCDIR)/solver.cpp \
-           $(SRCDIR)/io.cpp
+           $(SRCDIR)/solver.cpp
 OBJS     = $(SRCS:.cpp=.o)
 TARGET   = solver_1d
 
