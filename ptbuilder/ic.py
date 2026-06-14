@@ -181,21 +181,23 @@ def write_2d_setup(model, gamma: float, times: np.ndarray,
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as f:
-        # Named scalar attributes (replaces the old flat header[16])
-        f.attrs["n_z"]          = n_z_half
-        f.attrs["n_w"]          = p.n_w
-        f.attrs["n_k"]          = p.n_k
-        f.attrs["n_t"]          = len(times)
-        f.attrs["ds"]           = ds
-        f.attrs["how_often_ds"] = p.how_often_ds
-        f.attrs["baby_steps"]   = p.baby_steps
-        f.attrs["d"]            = d
-        f.attrs["t_0"]          = t_0
-        f.attrs["t_cut"]        = t_cut
-        f.attrs["t_m"]          = t_m
-        f.attrs["t_max"]        = t_max
-        f.attrs["smax"]         = smax
-        f.attrs["cutoff_type"]  = p.cutoff_type
+        # Named scalar attributes (replaces the old flat header[16]).
+        # Integers written as int32 to match C++ NATIVE_INT; h5py 3.x would
+        # otherwise default to int64 which some HDF5 builds can't convert.
+        f.attrs["n_z"]          = np.int32(n_z_half)
+        f.attrs["n_w"]          = np.int32(p.n_w)
+        f.attrs["n_k"]          = np.int32(p.n_k)
+        f.attrs["n_t"]          = np.int32(len(times))
+        f.attrs["ds"]           = float(ds)
+        f.attrs["how_often_ds"] = np.int32(p.how_often_ds)
+        f.attrs["baby_steps"]   = np.int32(p.baby_steps)
+        f.attrs["d"]            = float(d)
+        f.attrs["t_0"]          = float(t_0)
+        f.attrs["t_cut"]        = float(t_cut)
+        f.attrs["t_m"]          = float(t_m)
+        f.attrs["t_max"]        = float(t_max)
+        f.attrs["smax"]         = float(smax)
+        f.attrs["cutoff_type"]  = np.int32(p.cutoff_type)
 
         # Potential group (read by C++ Potential::from_hdf5)
         pot_grp = f.require_group("potential")

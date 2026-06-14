@@ -73,7 +73,10 @@ class Potential(ABC):
 
     def to_hdf5(self, group: h5py.Group) -> None:
         """Write potential to an HDF5 group (readable by C++ potential.h)."""
-        group.attrs["type"]      = self.type_name
+        # Write as variable-length ASCII so C++ H5::PredType::C_S1 can read it.
+        # h5py 3.x defaults to UTF-8, which HDF5 cannot convert to ASCII.
+        group.attrs.create("type", self.type_name,
+                           dtype=h5py.string_dtype(encoding='ascii'))
         group.attrs["phi_false"] = float(self.phi_false)
         group.attrs["phi_true"]  = float(self.phi_true)
         for key, val in self.params.items():
