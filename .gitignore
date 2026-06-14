@@ -25,5 +25,8 @@ notebooks/.ipynb_checkpoints/
 results/
 *.h5
 
+# Cluster
+load.sh
+
 # macOS
 .DS_Store
