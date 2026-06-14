@@ -175,7 +175,6 @@ void FindAllCollisionWeights(const WeightsSetup &setup,
                               std::vector<double> &flat_weights,
                               std::vector<std::pair<int,int>> &collision_pairs) {
     const int n_b = setup.n_b;
-    const int n_t = setup.n_t;
 
     // First pass: find which pairs actually collide (inside the box)
     // We do this single-threaded to build the pair list
