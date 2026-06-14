@@ -1,7 +1,11 @@
-CXX      = g++
-CXXFLAGS = -std=c++17 -O2 -Wall -Wextra
-INCLUDES = -I../../common -I/usr/include/hdf5/serial -I/usr/local/include
-LIBS     = -L/usr/lib/x86_64-linux-gnu/hdf5/serial -lhdf5_cpp -lhdf5 -lm
+CXX      = CC
+CXXFLAGS = -std=c++17 -O3 -ffast-math -Wall -Wextra -Wno-sign-compare
+
+HDF5_INCLUDE = ${HDF5_DIR}/include
+HDF5_LIB     = ${HDF5_DIR}/lib
+
+INCLUDES = -I../../common -I$(HDF5_INCLUDE)
+LIBS     = -L$(HDF5_LIB) -lhdf5_cpp -lhdf5 -lm
 
 SRCDIR   = src
 SRCS     = $(SRCDIR)/main.cpp \
