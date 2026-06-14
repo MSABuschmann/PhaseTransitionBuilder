@@ -6,7 +6,7 @@ _REPO_ROOT = Path(__file__).parent.parent
 
 @dataclass
 class Config:
-    results_dir: Path = Path("data")
+    results_dir: Path = _REPO_ROOT / "data"
     bubblemaster_bin: Path = _REPO_ROOT / "bin/bubblemaster"
     solver_1d_bin: Path    = _REPO_ROOT / "bin/solver_1d"
     weights_bin: Path      = _REPO_ROOT / "bin/weights"

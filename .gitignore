@@ -23,7 +23,12 @@ notebooks/.ipynb_checkpoints/
 
 # HDF5 outputs / simulation results
 results/
+data/
 *.h5
+
+# Generated scripts and logs
+scripts/
+logs/
 
 # Cluster
 load.sh
