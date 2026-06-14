@@ -132,13 +132,15 @@ def _two_bubble_ic(profile, gamma: float, dz: float):
 
 def _cutoff_times(d: float, cutoff_type: int, t_0_scal: float,
                   t_min_global: float = 0.0):
-    t_0   = 3.0 / 40.0 * d * t_0_scal
-    t_cut = 12.0 / 9.0 * d
+    # Match reference: smax=1.2*d, t_cut=0.9*smax, t_0=(smax-t_cut)/4
+    smax  = 1.2 * d
+    t_cut = 0.9 * smax                          # = 1.08 * d
+    t_0   = 0.25 * (smax - t_cut) * t_0_scal   # = 0.03 * d
     t_m   = t_cut + t_0 / 2.0
     if cutoff_type == 0:
         t_max = t_cut + 7.0 * t_0
     else:
-        t_max = t_m + t_0 / 2.0
+        t_max = t_cut + t_0
     t_max = max(t_max, t_min_global)
     return t_0, t_cut, t_m, t_max
 
@@ -167,7 +169,7 @@ def write_2d_setup(model, gamma: float, times: np.ndarray,
     t_min_global       = float(times[-1]) if len(times) > 0 else 0.
     t_0, t_cut, t_m, t_max = _cutoff_times(d, p.cutoff_type, p.t_0_scal,
                                             t_min_global)
-    smax = max(1.2 * d, 1.2 * t_max)
+    smax = 1.2 * d
 
     n_z_half = len(z)
     dz_act   = float(z[1] - z[0])
