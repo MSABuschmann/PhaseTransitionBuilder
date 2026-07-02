@@ -2,9 +2,15 @@
 #include <string>
 
 #include "evolution.h"
-#include "integrator.h"
 #include "io.h"
 #include "setup.h"
+
+#ifdef USE_FILON
+#  include "filon_integrator.h"
+   using Integrator = FilonIntegrator;
+#else
+#  include "integrator.h"
+#endif
 
 int main(int argc, char *argv[]) {
     if (argc < 3 || argc > 4) {

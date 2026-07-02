@@ -5,30 +5,44 @@ HDF5_INCLUDE = ${HDF5_DIR}/include
 HDF5_LIB     = ${HDF5_DIR}/lib
 
 INCLUDES = -I../../common -I$(HDF5_INCLUDE)
-LIBS     = -L$(HDF5_LIB) -lhdf5_cpp -lhdf5 -lgsl -lgslcblas -lm -fopenmp
 
-SRCDIR   = src
-SRCS     = $(SRCDIR)/main.cpp \
-           $(SRCDIR)/evolution.cpp \
-           $(SRCDIR)/integrator.cpp \
-           $(SRCDIR)/io.cpp
-OBJS     = $(SRCS:.cpp=.o)
-TARGET   = bubblemaster
+# GSL version
+LIBS_GSL  = -L$(HDF5_LIB) -lhdf5_cpp -lhdf5 -lgsl -lgslcblas -lm -fopenmp
+# Filon version — no GSL dependency
+LIBS_FILON = -L$(HDF5_LIB) -lhdf5_cpp -lhdf5 -lm -fopenmp
 
-.PHONY: all clean
+SRCDIR = src
 
-all: $(TARGET)
+SRCS_COMMON = $(SRCDIR)/main.cpp \
+              $(SRCDIR)/evolution.cpp \
+              $(SRCDIR)/io.cpp
 
-$(TARGET): $(OBJS)
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)
+SRCS_GSL   = $(SRCS_COMMON) $(SRCDIR)/integrator.cpp
+SRCS_FILON = $(SRCS_COMMON) $(SRCDIR)/filon_integrator.cpp
 
-$(SRCDIR)/%.o: $(SRCDIR)/%.cpp
+OBJS_GSL   = $(SRCS_GSL:.cpp=_gsl.o)
+OBJS_FILON = $(SRCS_FILON:.cpp=_filon.o)
+
+.PHONY: all gsl filon clean
+
+all: gsl filon
+
+gsl: bubblemaster
+filon: bubblemaster_filon
+
+# --- GSL build ---
+bubblemaster: $(OBJS_GSL)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS_GSL)
+
+$(SRCDIR)/%_gsl.o: $(SRCDIR)/%.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c -o $@ $<
 
-$(SRCDIR)/main.cpp: $(SRCDIR)/evolution.h $(SRCDIR)/integrator.h $(SRCDIR)/io.h $(SRCDIR)/setup.h
-$(SRCDIR)/evolution.cpp: $(SRCDIR)/evolution.h $(SRCDIR)/io.h
-$(SRCDIR)/integrator.cpp: $(SRCDIR)/integrator.h $(SRCDIR)/integrand.h $(SRCDIR)/interpolator.h $(SRCDIR)/io.h
-$(SRCDIR)/io.cpp: $(SRCDIR)/io.h
+# --- Filon build ---
+bubblemaster_filon: $(OBJS_FILON)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS_FILON)
+
+$(SRCDIR)/%_filon.o: $(SRCDIR)/%.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -DUSE_FILON -c -o $@ $<
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(SRCDIR)/*_gsl.o $(SRCDIR)/*_filon.o bubblemaster bubblemaster_filon
