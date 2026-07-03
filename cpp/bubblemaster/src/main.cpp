@@ -5,7 +5,10 @@
 #include "io.h"
 #include "setup.h"
 
-#ifdef USE_FILON
+#ifdef USE_GPU
+#  include "gpu_integrator.cuh"
+   using Integrator = GpuIntegrator;
+#elif defined(USE_FILON)
 #  include "filon_integrator.h"
    using Integrator = FilonIntegrator;
 #else
