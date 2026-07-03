@@ -14,9 +14,11 @@
 
 #include <cmath>
 
-// Number of sub-intervals.  Must be even.
-// Increase if accuracy is insufficient at high frequencies.
-static constexpr int FILON_N = 2048;
+// Minimum number of sub-intervals (must be even).
+// The actual N per integral is raised automatically to keep ~8 panels per
+// Bessel-function oscillation cycle in g(u); see integral_u_filon in
+// filon_integrator.cpp.
+static constexpr int FILON_N_MIN = 2048;
 
 // ---------------------------------------------------------------------------
 // Filon coefficients

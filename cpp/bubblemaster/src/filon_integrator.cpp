@@ -41,7 +41,7 @@ FilonIntegrator::FilonIntegrator(const std::vector<std::vector<double>> &input_p
 
     std::cout << "FilonIntegrator: n_z=" << n_z_ << " n_s=" << n_s_
               << " n_w=" << n_w_ << " n_k=" << n_k_
-              << "  FILON_N=" << FILON_N << "\n"
+              << "  FILON_N_MIN=" << FILON_N_MIN << " (adaptive)\n"
               << "  phi_ flat layout: "
               << (n_s_ * n_z_ * 8) / (1 << 20) << " MB per array\n"
               << "  t_cut=" << t_cut_base_ << " t_m=" << t_m_base_
@@ -83,22 +83,27 @@ void FilonIntegrator::integral_u_filon(double s, double Sqrt1mkk, double w,
                                         double &xx_r, double &xx_i,
                                         double &yy_r, double &yy_i,
                                         double &xz_r, double &xz_i) const {
-    const int    N     = FILON_N;
     const double umax  = u_max(s, t_max);
+
+    // Choose N large enough to resolve Bessel oscillations in g(u).
+    // j0, j1 period ≈ 2π in ib; require 8 panels per oscillation.
+    // ib_max = w * Sqrt1mkk * s * sqrt(umax² + sign) at the upper endpoint.
+    const double u2s_max = umax * umax + sign;
+    const double ib_max  = (u2s_max > 0.) ? w * Sqrt1mkk * s * std::sqrt(u2s_max) : 0.;
+    int N = std::max(FILON_N_MIN, (int)(8.0 * ib_max / (2.0 * M_PI)) + 2);
+    N = (N + 1) & ~1;  // round up to even
+
     const double h     = (umax - umin) / N;
     const double omega = w * s;
 
-    double g_zz[FILON_N + 1];
-    double g_xx[FILON_N + 1];
-    double g_yy[FILON_N + 1];
-    double g_xz[FILON_N + 1];
+    std::vector<double> g_zz(N + 1), g_xx(N + 1), g_yy(N + 1), g_xz(N + 1);
 
     for (int i = 0; i <= N; ++i) {
-        const double u      = umin + i * h;
-        const double u2s    = u * u + sign;
+        const double u       = umin + i * h;
+        const double u2s     = u * u + sign;
         const double u2s_pos = (u2s > 0.) ? u2s : 0.;
-        const double ib     = w * Sqrt1mkk * s * std::sqrt(u2s_pos);
-        const double c1     = C1(s * u, t_cut, t_m, t_0_, t_max, cutoff_type_);
+        const double ib      = w * Sqrt1mkk * s * std::sqrt(u2s_pos);
+        const double c1      = C1(s * u, t_cut, t_m, t_0_, t_max, cutoff_type_);
 
         const double bj0 = fast_bessel_j0(ib);
         const double bj1 = fast_bessel_j1(ib);
@@ -118,10 +123,10 @@ void FilonIntegrator::integral_u_filon(double s, double Sqrt1mkk, double w,
         g_xz[i] = sign * std::sqrt(u2s_pos) * bj1 * c1;
     }
 
-    filon_cos_sin(g_zz, N, umin, h, omega, zz_r, zz_i);
-    filon_cos_sin(g_xx, N, umin, h, omega, xx_r, xx_i);
-    filon_cos_sin(g_yy, N, umin, h, omega, yy_r, yy_i);
-    filon_cos_sin(g_xz, N, umin, h, omega, xz_r, xz_i);
+    filon_cos_sin(g_zz.data(), N, umin, h, omega, zz_r, zz_i);
+    filon_cos_sin(g_xx.data(), N, umin, h, omega, xx_r, xx_i);
+    filon_cos_sin(g_yy.data(), N, umin, h, omega, yy_r, yy_i);
+    filon_cos_sin(g_xz.data(), N, umin, h, omega, xz_r, xz_i);
 }
 
 // ---------------------------------------------------------------------------
