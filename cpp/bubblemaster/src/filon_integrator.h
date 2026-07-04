@@ -16,8 +16,9 @@
 
 class FilonIntegrator {
 public:
+    // param: N_min for Filon panels; -1 → use compiled FILON_N_MIN default
     FilonIntegrator(const std::vector<std::vector<double>> &input_phi,
-                    const Setup &setup);
+                    const Setup &setup, int param = -1);
 
     std::vector<double> Compute(int i_t) const;
 
@@ -87,6 +88,8 @@ private:
     double t_cut_base_, t_m_base_, t_max_base_, t_0_;
     double d_;
     int    cutoff_type_;
+
+    int n_min_;  // effective FILON_N_MIN (set from --param or compile default)
 
     std::vector<double> z_, wlist_, slist_, times_;
 

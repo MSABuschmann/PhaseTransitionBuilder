@@ -16,15 +16,24 @@
 #endif
 
 int main(int argc, char *argv[]) {
-    if (argc < 3 || argc > 4) {
-        std::cerr << "Usage: bubblemaster <setup.h5> <output_dir/> [--save-fields]\n";
+    if (argc < 3) {
+        std::cerr << "Usage: bubblemaster <setup.h5> <output_dir/>"
+                     " [--save-fields] [--param N]\n"
+                     "  --param N  Filon: N_min panels; GSL: subinterval limit\n";
         return 1;
     }
 
     const std::string setup_path = argv[1];
     const std::string output_dir = argv[2];
-    const bool save_fields = (argc == 4 &&
-                               std::string(argv[3]) == "--save-fields");
+    bool save_fields = false;
+    int  qual_param  = -1;   // -1 → use compiled default
+    for (int i = 3; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--save-fields")
+            save_fields = true;
+        else if (a == "--param" && i + 1 < argc)
+            qual_param = std::atoi(argv[++i]);
+    }
 
     std::cout << "Setup:  " << setup_path << "\n";
     std::cout << "Output: " << output_dir << "\n";
@@ -42,7 +51,7 @@ int main(int argc, char *argv[]) {
         SaveFields(output_dir, phi_snaps, evo.GetSlist(), setup.z);
 
     // --- 3. Run GW integration for each time index ---
-    Integrator integrator(phi_snaps, setup);
+    Integrator integrator(phi_snaps, setup, qual_param);
     const auto &wlist = integrator.GetW();
 
     const int n_t = setup.n_t;

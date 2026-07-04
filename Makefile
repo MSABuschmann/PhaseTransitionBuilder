@@ -31,6 +31,7 @@ bubblemaster_gpu: $(BIN_DIR)
 	$(MAKE) -C $(BUBBLEMASTER) gpu
 	cp $(BUBBLEMASTER)/bubblemaster_gpu $(BIN_DIR)/bubblemaster_gpu
 
+
 solver_1d: $(BIN_DIR)
 	$(MAKE) -C $(SOLVER_1D)
 	cp $(SOLVER_1D)/solver_1d $(BIN_DIR)/solver_1d

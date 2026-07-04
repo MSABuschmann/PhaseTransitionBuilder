@@ -9,8 +9,9 @@
 
 class Integrator {
 public:
+    // param: GSL subinterval limit; -1 → use default (1000)
     Integrator(const std::vector<std::vector<double>> &input_phi,
-               const Setup &setup);
+               const Setup &setup, int param = -1);
 
     // Run GW integration for time-index i_t.
     // Returns spectrum[n_w].  Uses local copies so it is non-destructive.
@@ -95,7 +96,7 @@ private:
     std::vector<std::vector<double>> phi_;   // snapshots from evolution
     std::vector<std::vector<double>> phi2_;  // two-bubble reference field
 
-    static constexpr double GSL_EPSABS  = 0.;
-    static constexpr int    GSL_LIMIT   = 1000;
-    static constexpr int    GSL_KEY     = GSL_INTEG_GAUSS15;
+    static constexpr double GSL_EPSABS = 0.;
+    static constexpr int    GSL_KEY    = GSL_INTEG_GAUSS15;
+    int gsl_limit_;  // set from --param or default 1000
 };

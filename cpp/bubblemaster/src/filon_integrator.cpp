@@ -17,14 +17,15 @@
 // ---------------------------------------------------------------------------
 
 FilonIntegrator::FilonIntegrator(const std::vector<std::vector<double>> &input_phi,
-                                 const Setup &setup)
+                                 const Setup &setup, int param)
     : n_k_(setup.n_k), n_w_(setup.n_w),
       ds_(setup.ds * setup.how_often_ds),
       dz_(std::abs(setup.z[1] - setup.z[0])),
       t_cut_base_(setup.t_cut), t_m_base_(setup.t_m),
       t_max_base_(setup.t_max), t_0_(setup.t_0),
       d_(setup.d), cutoff_type_(setup.cutoff_type),
-      z_(setup.z), wlist_(setup.wlist), times_(setup.times)
+      z_(setup.z), wlist_(setup.wlist), times_(setup.times),
+      n_min_(param <= 0 ? FILON_N_MIN : (param + 1) & ~1)
 {
     n_z_ = z_.size();
     n_s_ = input_phi.size();
@@ -41,7 +42,7 @@ FilonIntegrator::FilonIntegrator(const std::vector<std::vector<double>> &input_p
 
     std::cout << "FilonIntegrator: n_z=" << n_z_ << " n_s=" << n_s_
               << " n_w=" << n_w_ << " n_k=" << n_k_
-              << "  FILON_N_MIN=" << FILON_N_MIN << " (adaptive)\n"
+              << "  FILON_N_MIN=" << n_min_ << " (adaptive)\n"
               << "  phi_ flat layout: "
               << (n_s_ * n_z_ * 8) / (1 << 20) << " MB per array\n"
               << "  t_cut=" << t_cut_base_ << " t_m=" << t_m_base_
@@ -90,7 +91,7 @@ void FilonIntegrator::integral_u_filon(double s, double Sqrt1mkk, double w,
     // ib_max = w * Sqrt1mkk * s * sqrt(umax² + sign) at the upper endpoint.
     const double u2s_max = umax * umax + sign;
     const double ib_max  = (u2s_max > 0.) ? w * Sqrt1mkk * s * std::sqrt(u2s_max) : 0.;
-    int N = std::max(FILON_N_MIN, (int)(8.0 * ib_max / (2.0 * M_PI)) + 2);
+    int N = std::max(n_min_, (int)(8.0 * ib_max / (2.0 * M_PI)) + 2);
     N = (N + 1) & ~1;  // round up to even
 
     const double h     = (umax - umin) / N;

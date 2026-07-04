@@ -320,7 +320,7 @@ __global__ void gw_kernel(
 // ---------------------------------------------------------------------------
 
 GpuIntegrator::GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
-                              const Setup &setup)
+                              const Setup &setup, int /*param*/)
     : n_k_(setup.n_k), n_w_(setup.n_w),
       ds_(setup.ds * setup.how_often_ds),
       dz_(std::abs(setup.z[1] - setup.z[0])),

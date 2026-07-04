@@ -18,7 +18,13 @@
 // The actual N per integral is raised automatically to keep ~8 panels per
 // Bessel-function oscillation cycle in g(u); see integral_u_filon in
 // filon_integrator.cpp.
+// Set FILON_N_TEST > 0 at compile time (e.g. -DFILON_N_TEST=32768) to
+// override FILON_N_MIN for convergence testing.
+#ifdef FILON_N_TEST
+static constexpr int FILON_N_MIN = FILON_N_TEST;
+#else
 static constexpr int FILON_N_MIN = 2048;
+#endif
 
 // ---------------------------------------------------------------------------
 // Filon coefficients

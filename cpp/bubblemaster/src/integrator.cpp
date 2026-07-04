@@ -14,7 +14,7 @@
 // ---------------------------------------------------------------------------
 
 Integrator::Integrator(const std::vector<std::vector<double>> &input_phi,
-                       const Setup &setup)
+                       const Setup &setup, int param)
     : n_k_(setup.n_k), n_w_(setup.n_w),
       ds_(setup.ds * setup.how_often_ds),
       dz_(std::abs(setup.z[1] - setup.z[0])),
@@ -22,7 +22,8 @@ Integrator::Integrator(const std::vector<std::vector<double>> &input_phi,
       t_max_base_(setup.t_max), t_0_(setup.t_0),
       d_(setup.d), cutoff_type_(setup.cutoff_type),
       z_(setup.z), wlist_(setup.wlist), times_(setup.times),
-      phi_(input_phi)
+      phi_(input_phi),
+      gsl_limit_(param <= 0 ? 1000 : param)
 {
     n_z_ = z_.size();
     n_s_ = phi_.size();
@@ -30,7 +31,8 @@ Integrator::Integrator(const std::vector<std::vector<double>> &input_phi,
     SetPhi2();
 
     std::cout << "Integrator: n_z=" << n_z_ << " n_s=" << n_s_
-              << " n_w=" << n_w_ << " n_k=" << n_k_ << "\n"
+              << " n_w=" << n_w_ << " n_k=" << n_k_
+              << "  gsl_limit_=" << gsl_limit_ << "\n"
               << "  t_cut=" << t_cut_base_ << " t_m=" << t_m_base_
               << " t_max=" << t_max_base_ << "\n\n";
 }
@@ -89,7 +91,7 @@ double Integrator::k_integral(double w, double eps_rel,
         {
             gsl_set_error_handler_off();
             gsl_integration_workspace *ws =
-                gsl_integration_workspace_alloc(GSL_LIMIT);
+                gsl_integration_workspace_alloc(gsl_limit_);
 
             gsl_function fr_xx, fi_xx, fr_yy, fi_yy,
                          fr_zz, fi_zz, fr_xz, fi_xz;
@@ -213,9 +215,9 @@ void Integrator::integral_u_quad(gsl_function &fr, gsl_function &fi,
     fi.params = &args;
     double err;
     gsl_integration_qag(&fr, umin, u_max(s, t_max), GSL_EPSABS, eps_rel,
-                        GSL_LIMIT, GSL_KEY, ws, &real, &err);
+                        gsl_limit_, GSL_KEY, ws, &real, &err);
     gsl_integration_qag(&fi, umin, u_max(s, t_max), GSL_EPSABS, eps_rel,
-                        GSL_LIMIT, GSL_KEY, ws, &imag, &err);
+                        gsl_limit_, GSL_KEY, ws, &imag, &err);
 }
 
 void Integrator::integral_u_quad_region1(gsl_function &fr, gsl_function &fi,

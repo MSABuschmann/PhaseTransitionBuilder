@@ -19,8 +19,9 @@
 
 class GpuIntegrator {
 public:
+    // param is ignored (GPU uses compiled-in N_MIN); present for interface parity
     GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
-                  const Setup &setup);
+                  const Setup &setup, int param = -1);
     ~GpuIntegrator();
 
     std::vector<double> Compute(int i_t) const;
