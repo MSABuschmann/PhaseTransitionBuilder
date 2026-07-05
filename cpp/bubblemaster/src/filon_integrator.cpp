@@ -42,7 +42,7 @@ FilonIntegrator::FilonIntegrator(const std::vector<std::vector<double>> &input_p
 
     std::cout << "FilonIntegrator: n_z=" << n_z_ << " n_s=" << n_s_
               << " n_w=" << n_w_ << " n_k=" << n_k_
-              << "  FILON_N_MIN=" << n_min_ << " (adaptive)\n"
+              << "  FILON_N_MIN=" << n_min_ << " per segment (split at t_cut/s)\n"
               << "  phi_ flat layout: "
               << (n_s_ * n_z_ * 8) / (1 << 20) << " MB per array\n"
               << "  t_cut=" << t_cut_base_ << " t_m=" << t_m_base_
@@ -84,50 +84,84 @@ void FilonIntegrator::integral_u_filon(double s, double Sqrt1mkk, double w,
                                         double &xx_r, double &xx_i,
                                         double &yy_r, double &yy_i,
                                         double &xz_r, double &xz_i) const {
-    const double umax  = u_max(s, t_max);
+    // C1 = 0 for t = s*u >= t_max → integrand is zero above u = t_max/s.
+    // Truncating at u_top avoids wasting panels in the dead zone.
+    const double u_top   = t_max / s;
+    // C1 has a C¹ but not C² junction at t = t_cut (second derivative jumps
+    // where the flat-1 region meets the smooth formula).  Splitting at the
+    // corresponding u = t_cut/s restores O(h⁴) Filon convergence on each
+    // sub-interval instead of O(h²) for the unsplit integral.
+    const double u_split = t_cut / s;
 
-    // Choose N large enough to resolve Bessel oscillations in g(u).
-    // j0, j1 period ≈ 2π in ib; require 8 panels per oscillation.
-    // ib_max = w * Sqrt1mkk * s * sqrt(umax² + sign) at the upper endpoint.
-    const double u2s_max = umax * umax + sign;
-    const double ib_max  = (u2s_max > 0.) ? w * Sqrt1mkk * s * std::sqrt(u2s_max) : 0.;
-    int N = std::max(n_min_, (int)(8.0 * ib_max / (2.0 * M_PI)) + 2);
-    N = (N + 1) & ~1;  // round up to even
-
-    const double h     = (umax - umin) / N;
-    const double omega = w * s;
-
-    std::vector<double> g_zz(N + 1), g_xx(N + 1), g_yy(N + 1), g_xz(N + 1);
-
-    for (int i = 0; i <= N; ++i) {
-        const double u       = umin + i * h;
-        const double u2s     = u * u + sign;
-        const double u2s_pos = (u2s > 0.) ? u2s : 0.;
-        const double ib      = w * Sqrt1mkk * s * std::sqrt(u2s_pos);
-        const double c1      = C1(s * u, t_cut, t_m, t_0_, t_max, cutoff_type_);
-
-        const double bj0 = fast_bessel_j0(ib);
-        const double bj1 = fast_bessel_j1(ib);
-        double bj0m2, bj0p2;
-        if (ib < 1e-14) {
-            bj0m2 = 1.0;
-            bj0p2 = 1.0;
-        } else {
-            const double two_over_ib = 2.0 / ib;
-            bj0m2 = 2.0 * bj0 - two_over_ib * bj1;
-            bj0p2 = two_over_ib * bj1;
-        }
-
-        g_zz[i] = bj0  * c1;
-        g_xx[i] = u2s  * bj0m2 * c1;
-        g_yy[i] = u2s  * bj0p2 * c1;
-        g_xz[i] = sign * std::sqrt(u2s_pos) * bj1 * c1;
+    if (u_top <= umin) {
+        // Entire interval lies in the dead zone.
+        zz_r = zz_i = xx_r = xx_i = yy_r = yy_i = xz_r = xz_i = 0.;
+        return;
     }
 
-    filon_cos_sin(g_zz.data(), N, umin, h, omega, zz_r, zz_i);
-    filon_cos_sin(g_xx.data(), N, umin, h, omega, xx_r, xx_i);
-    filon_cos_sin(g_yy.data(), N, umin, h, omega, yy_r, yy_i);
-    filon_cos_sin(g_xz.data(), N, umin, h, omega, xz_r, xz_i);
+    const double omega = w * s;
+
+    // Core Filon evaluation on [a, b].
+    auto run_segment = [&](double a, double b,
+                           double &r_zz, double &i_zz,
+                           double &r_xx, double &i_xx,
+                           double &r_yy, double &i_yy,
+                           double &r_xz, double &i_xz) {
+        if (a >= b) {
+            r_zz = i_zz = r_xx = i_xx = r_yy = i_yy = r_xz = i_xz = 0.;
+            return;
+        }
+        const double u2s_b = b * b + sign;
+        const double ib_b  = (u2s_b > 0.) ? w * Sqrt1mkk * s * std::sqrt(u2s_b) : 0.;
+        int N = std::max(n_min_, (int)(8.0 * ib_b / (2.0 * M_PI)) + 2);
+        N = (N + 1) & ~1;
+
+        const double h = (b - a) / N;
+
+        std::vector<double> g_zz(N + 1), g_xx(N + 1), g_yy(N + 1), g_xz(N + 1);
+        for (int i = 0; i <= N; ++i) {
+            const double u       = a + i * h;
+            const double u2s     = u * u + sign;
+            const double u2s_pos = (u2s > 0.) ? u2s : 0.;
+            const double ib      = w * Sqrt1mkk * s * std::sqrt(u2s_pos);
+            const double c1      = C1(s * u, t_cut, t_m, t_0_, t_max, cutoff_type_);
+
+            const double bj0 = fast_bessel_j0(ib);
+            const double bj1 = fast_bessel_j1(ib);
+            double bj0m2, bj0p2;
+            if (ib < 1e-14) {
+                bj0m2 = 1.0;
+                bj0p2 = 1.0;
+            } else {
+                const double two_over_ib = 2.0 / ib;
+                bj0m2 = 2.0 * bj0 - two_over_ib * bj1;
+                bj0p2 = two_over_ib * bj1;
+            }
+
+            g_zz[i] = bj0  * c1;
+            g_xx[i] = u2s  * bj0m2 * c1;
+            g_yy[i] = u2s  * bj0p2 * c1;
+            g_xz[i] = sign * std::sqrt(u2s_pos) * bj1 * c1;
+        }
+
+        filon_cos_sin(g_zz.data(), N, a, h, omega, r_zz, i_zz);
+        filon_cos_sin(g_xx.data(), N, a, h, omega, r_xx, i_xx);
+        filon_cos_sin(g_yy.data(), N, a, h, omega, r_yy, i_yy);
+        filon_cos_sin(g_xz.data(), N, a, h, omega, r_xz, i_xz);
+    };
+
+    if (u_split > umin && u_split < u_top) {
+        double lo_zz_r, lo_zz_i, lo_xx_r, lo_xx_i, lo_yy_r, lo_yy_i, lo_xz_r, lo_xz_i;
+        double hi_zz_r, hi_zz_i, hi_xx_r, hi_xx_i, hi_yy_r, hi_yy_i, hi_xz_r, hi_xz_i;
+        run_segment(umin,    u_split, lo_zz_r, lo_zz_i, lo_xx_r, lo_xx_i, lo_yy_r, lo_yy_i, lo_xz_r, lo_xz_i);
+        run_segment(u_split, u_top,   hi_zz_r, hi_zz_i, hi_xx_r, hi_xx_i, hi_yy_r, hi_yy_i, hi_xz_r, hi_xz_i);
+        zz_r = lo_zz_r + hi_zz_r;  zz_i = lo_zz_i + hi_zz_i;
+        xx_r = lo_xx_r + hi_xx_r;  xx_i = lo_xx_i + hi_xx_i;
+        yy_r = lo_yy_r + hi_yy_r;  yy_i = lo_yy_i + hi_yy_i;
+        xz_r = lo_xz_r + hi_xz_r;  xz_i = lo_xz_i + hi_xz_i;
+    } else {
+        run_segment(umin, u_top, zz_r, zz_i, xx_r, xx_i, yy_r, yy_i, xz_r, xz_i);
+    }
 }
 
 // ---------------------------------------------------------------------------
