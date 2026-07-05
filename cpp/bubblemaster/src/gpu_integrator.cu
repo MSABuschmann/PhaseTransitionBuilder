@@ -139,8 +139,83 @@ __device__ __forceinline__ void fs_result(const FStream &fs,
 }
 
 // ---------------------------------------------------------------------------
-// Streaming Filon u-integral — templated to compute only the needed
-// stress-tensor components and avoid dead arithmetic in the main kernel.
+// N for one sub-interval: 64 panels per Bessel oscillation, floor=2048.
+// Uses delta-ib = ib(b) - ib(a) so each segment is resolved independently.
+// ---------------------------------------------------------------------------
+
+__device__ __forceinline__ int filon_N(double a, double b, double sign,
+                                        double w, double Sqrt1mkk, double s)
+{
+    const double u2s_a = a * a + sign;
+    const double ib_a  = (u2s_a > 0.) ? w * Sqrt1mkk * s * sqrt(u2s_a) : 0.;
+    const double u2s_b = b * b + sign;
+    const double ib_b  = (u2s_b > 0.) ? w * Sqrt1mkk * s * sqrt(u2s_b) : 0.;
+    int N = max(2048, (int)(64.0 * (ib_b - ib_a) / (2.0 * M_PI)) + 2);
+    return (N + 1) & ~1;
+}
+
+// ---------------------------------------------------------------------------
+// Streaming Filon u-integral over one sub-interval [a, b] with N panels.
+// Templated to compute only needed stress-tensor components.
+// ---------------------------------------------------------------------------
+
+template <bool NEED_ZZ, bool NEED_XYZ>
+__device__ void filon_segment(
+    double s, double Sqrt1mkk, double w, double sign,
+    double a, double b, int N,
+    double t_cut, double t_m, double t_0, double t_max, int cutoff_type,
+    double &I_zz_c, double &I_zz_s,
+    double &I_xx_c, double &I_xx_s,
+    double &I_yy_c, double &I_yy_s,
+    double &I_xz_c, double &I_xz_s)
+{
+    const double h     = (b - a) / N;
+    const double omega = w * s;
+
+    FStream fzz = {}, fxx = {}, fyy = {}, fxz = {};
+
+    for (int i = 0; i <= N; ++i) {
+        double u       = a + i * h;
+        double u2s     = u * u + sign;
+        double u2s_pos = fmax(0., u2s);
+        double ib      = w * Sqrt1mkk * s * sqrt(u2s_pos);
+        double c1      = d_C1(s * u, t_cut, t_m, t_0, t_max, cutoff_type);
+
+        double bj0 = d_j0(ib), bj1 = d_j1(ib);
+        double bj0m2, bj0p2;
+        if (ib < 1e-14) {
+            bj0m2 = 1.0; bj0p2 = 1.0;
+        } else {
+            double toi = 2.0 / ib;
+            bj0m2 = 2.0 * bj0 - toi * bj1;
+            bj0p2 = toi * bj1;
+        }
+
+        double wu = omega * u;
+        double cw = cos(wu), sw = sin(wu);
+
+        if (NEED_ZZ)  fs_update(fzz, i, N, bj0 * c1,                   cw, sw);
+        if (NEED_XYZ) {
+            fs_update(fxx, i, N, u2s * bj0m2 * c1,                     cw, sw);
+            fs_update(fyy, i, N, u2s * bj0p2 * c1,                     cw, sw);
+            fs_update(fxz, i, N, sign * sqrt(u2s_pos) * bj1 * c1,      cw, sw);
+        }
+    }
+
+    double alpha, beta, gamma_f;
+    d_filon_coeffs(omega * h, alpha, beta, gamma_f);
+
+    if (NEED_ZZ)  fs_result(fzz, alpha, beta, gamma_f, h, I_zz_c, I_zz_s);
+    if (NEED_XYZ) {
+        fs_result(fxx, alpha, beta, gamma_f, h, I_xx_c, I_xx_s);
+        fs_result(fyy, alpha, beta, gamma_f, h, I_yy_c, I_yy_s);
+        fs_result(fxz, alpha, beta, gamma_f, h, I_xz_c, I_xz_s);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming Filon u-integral — split at t_cut/s to eliminate the C² kink,
+// dead zone removed (upper limit t_max/s, not 1+t_max/s), N from delta-ib.
 //
 //   NEED_ZZ  = true for calls at time s (zz component feeds the zz z-integral)
 //   NEED_XYZ = true for calls at time s_off (xx, yy, xz feed the other z-integrals)
@@ -156,53 +231,44 @@ __device__ void filon_u(double s, double Sqrt1mkk, double w,
                          double &yy_r, double &yy_i,
                          double &xz_r, double &xz_i)
 {
-    const double umax   = 1.0 + t_max / s;
-    const double u2s_mx = umax*umax + sign;
-    const double ib_max = (u2s_mx > 0.) ? w * Sqrt1mkk * s * sqrt(u2s_mx) : 0.;
-    int N = max(2048, (int)(8.0 * ib_max / (2.0 * M_PI)) + 2);
-    N = (N + 1) & ~1;   // round up to even
+    const double u_top   = t_max / s;
+    const double u_split = t_cut / s;
 
-    const double h     = (umax - umin) / N;
-    const double omega = w * s;
-
-    FStream fzz = {}, fxx = {}, fyy = {}, fxz = {};
-
-    for (int i = 0; i <= N; ++i) {
-        double u       = umin + i * h;
-        double u2s     = u*u + sign;
-        double u2s_pos = fmax(0., u2s);
-        double ib      = w * Sqrt1mkk * s * sqrt(u2s_pos);
-        double c1      = d_C1(s*u, t_cut, t_m, t_0, t_max, cutoff_type);
-
-        double bj0 = d_j0(ib), bj1 = d_j1(ib);
-        double bj0m2, bj0p2;
-        if (ib < 1e-14) {
-            bj0m2 = 1.0; bj0p2 = 1.0;
-        } else {
-            double toi = 2.0 / ib;
-            bj0m2 = 2.0*bj0 - toi*bj1;
-            bj0p2 = toi*bj1;
-        }
-
-        double wu = omega * u;
-        double cw = cos(wu), sw = sin(wu);
-
-        if (NEED_ZZ)  fs_update(fzz, i, N, bj0 * c1,          cw, sw);
-        if (NEED_XYZ) {
-            fs_update(fxx, i, N, u2s * bj0m2 * c1,            cw, sw);
-            fs_update(fyy, i, N, u2s * bj0p2 * c1,            cw, sw);
-            fs_update(fxz, i, N, sign*sqrt(u2s_pos)*bj1*c1,   cw, sw);
-        }
+    if (u_top <= umin) {
+        zz_r = zz_i = xx_r = xx_i = yy_r = yy_i = xz_r = xz_i = 0.;
+        return;
     }
 
-    double alpha, beta, gamma_f;
-    d_filon_coeffs(omega * h, alpha, beta, gamma_f);
+    if (u_split > umin && u_split < u_top) {
+        int N_lo = filon_N(umin,    u_split, sign, w, Sqrt1mkk, s);
+        int N_hi = filon_N(u_split, u_top,   sign, w, Sqrt1mkk, s);
 
-    if (NEED_ZZ)  { fs_result(fzz, alpha, beta, gamma_f, h, zz_r, zz_i); }
-    if (NEED_XYZ) {
-        fs_result(fxx, alpha, beta, gamma_f, h, xx_r, xx_i);
-        fs_result(fyy, alpha, beta, gamma_f, h, yy_r, yy_i);
-        fs_result(fxz, alpha, beta, gamma_f, h, xz_r, xz_i);
+        double lo_zz_r = 0., lo_zz_i = 0., lo_xx_r = 0., lo_xx_i = 0.;
+        double lo_yy_r = 0., lo_yy_i = 0., lo_xz_r = 0., lo_xz_i = 0.;
+        double hi_zz_r = 0., hi_zz_i = 0., hi_xx_r = 0., hi_xx_i = 0.;
+        double hi_yy_r = 0., hi_yy_i = 0., hi_xz_r = 0., hi_xz_i = 0.;
+
+        filon_segment<NEED_ZZ, NEED_XYZ>(s, Sqrt1mkk, w, sign,
+            umin, u_split, N_lo,
+            t_cut, t_m, t_0, t_max, cutoff_type,
+            lo_zz_r, lo_zz_i, lo_xx_r, lo_xx_i,
+            lo_yy_r, lo_yy_i, lo_xz_r, lo_xz_i);
+        filon_segment<NEED_ZZ, NEED_XYZ>(s, Sqrt1mkk, w, sign,
+            u_split, u_top, N_hi,
+            t_cut, t_m, t_0, t_max, cutoff_type,
+            hi_zz_r, hi_zz_i, hi_xx_r, hi_xx_i,
+            hi_yy_r, hi_yy_i, hi_xz_r, hi_xz_i);
+
+        zz_r = lo_zz_r + hi_zz_r;  zz_i = lo_zz_i + hi_zz_i;
+        xx_r = lo_xx_r + hi_xx_r;  xx_i = lo_xx_i + hi_xx_i;
+        yy_r = lo_yy_r + hi_yy_r;  yy_i = lo_yy_i + hi_yy_i;
+        xz_r = lo_xz_r + hi_xz_r;  xz_i = lo_xz_i + hi_xz_i;
+    } else {
+        int N = filon_N(umin, u_top, sign, w, Sqrt1mkk, s);
+        filon_segment<NEED_ZZ, NEED_XYZ>(s, Sqrt1mkk, w, sign,
+            umin, u_top, N,
+            t_cut, t_m, t_0, t_max, cutoff_type,
+            zz_r, zz_i, xx_r, xx_i, yy_r, yy_i, xz_r, xz_i);
     }
 }
 

@@ -42,7 +42,7 @@ FilonIntegrator::FilonIntegrator(const std::vector<std::vector<double>> &input_p
 
     std::cout << "FilonIntegrator: n_z=" << n_z_ << " n_s=" << n_s_
               << " n_w=" << n_w_ << " n_k=" << n_k_
-              << "  FILON_N_MIN=" << n_min_ << " per segment (split at t_cut/s)\n"
+              << "  N=adaptive(64 panels/osc, floor=" << n_min_ << ") split at t_cut/s\n"
               << "  phi_ flat layout: "
               << (n_s_ * n_z_ * 8) / (1 << 20) << " MB per array\n"
               << "  t_cut=" << t_cut_base_ << " t_m=" << t_m_base_
@@ -111,9 +111,14 @@ void FilonIntegrator::integral_u_filon(double s, double Sqrt1mkk, double w,
             r_zz = i_zz = r_xx = i_xx = r_yy = i_yy = r_xz = i_xz = 0.;
             return;
         }
+        const double u2s_a = a * a + sign;
+        const double ib_a  = (u2s_a > 0.) ? w * Sqrt1mkk * s * std::sqrt(u2s_a) : 0.;
         const double u2s_b = b * b + sign;
         const double ib_b  = (u2s_b > 0.) ? w * Sqrt1mkk * s * std::sqrt(u2s_b) : 0.;
-        int N = std::max(n_min_, (int)(8.0 * ib_b / (2.0 * M_PI)) + 2);
+        // N scales with the number of Bessel oscillations in this sub-interval
+        // (ib_b - ib_a) rather than the absolute ib_b at the endpoint, so each
+        // segment is resolved at ~64 panels/oscillation regardless of where it sits.
+        int N = std::max(n_min_, (int)(64.0 * (ib_b - ib_a) / (2.0 * M_PI)) + 2);
         N = (N + 1) & ~1;
 
         const double h = (b - a) / N;
