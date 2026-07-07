@@ -144,13 +144,14 @@ __device__ __forceinline__ void fs_result(const FStream &fs,
 // ---------------------------------------------------------------------------
 
 __device__ __forceinline__ int filon_N(double a, double b, double sign,
-                                        double w, double Sqrt1mkk, double s)
+                                        double w, double Sqrt1mkk, double s,
+                                        int n_floor)
 {
     const double u2s_a = a * a + sign;
     const double ib_a  = (u2s_a > 0.) ? w * Sqrt1mkk * s * sqrt(u2s_a) : 0.;
     const double u2s_b = b * b + sign;
     const double ib_b  = (u2s_b > 0.) ? w * Sqrt1mkk * s * sqrt(u2s_b) : 0.;
-    int N = max(2048, (int)(64.0 * (ib_b - ib_a) / (2.0 * M_PI)) + 2);
+    int N = max(n_floor, (int)(64.0 * (ib_b - ib_a) / (2.0 * M_PI)) + 2);
     return (N + 1) & ~1;
 }
 
@@ -225,7 +226,7 @@ template <bool NEED_ZZ, bool NEED_XYZ>
 __device__ void filon_u(double s, double Sqrt1mkk, double w,
                          double sign, double umin,
                          double t_cut, double t_m, double t_0, double t_max,
-                         int cutoff_type,
+                         int cutoff_type, int n_floor,
                          double &zz_r, double &zz_i,
                          double &xx_r, double &xx_i,
                          double &yy_r, double &yy_i,
@@ -240,8 +241,8 @@ __device__ void filon_u(double s, double Sqrt1mkk, double w,
     }
 
     if (u_split > umin && u_split < u_top) {
-        int N_lo = filon_N(umin,    u_split, sign, w, Sqrt1mkk, s);
-        int N_hi = filon_N(u_split, u_top,   sign, w, Sqrt1mkk, s);
+        int N_lo = filon_N(umin,    u_split, sign, w, Sqrt1mkk, s, n_floor);
+        int N_hi = filon_N(u_split, u_top,   sign, w, Sqrt1mkk, s, n_floor);
 
         double lo_zz_r = 0., lo_zz_i = 0., lo_xx_r = 0., lo_xx_i = 0.;
         double lo_yy_r = 0., lo_yy_i = 0., lo_xz_r = 0., lo_xz_i = 0.;
@@ -264,7 +265,7 @@ __device__ void filon_u(double s, double Sqrt1mkk, double w,
         yy_r = lo_yy_r + hi_yy_r;  yy_i = lo_yy_i + hi_yy_i;
         xz_r = lo_xz_r + hi_xz_r;  xz_i = lo_xz_i + hi_xz_i;
     } else {
-        int N = filon_N(umin, u_top, sign, w, Sqrt1mkk, s);
+        int N = filon_N(umin, u_top, sign, w, Sqrt1mkk, s, n_floor);
         filon_segment<NEED_ZZ, NEED_XYZ>(s, Sqrt1mkk, w, sign,
             umin, u_top, N,
             t_cut, t_m, t_0, t_max, cutoff_type,
@@ -289,7 +290,7 @@ __global__ void gw_kernel(
     const double * __restrict__ k_arr,   // [n_k]
     const double * __restrict__ s_arr,   // [n_s]
     double t_cut, double t_m, double t_0, double t_max,
-    int cutoff_type,
+    int cutoff_type, int n_floor,
     double * __restrict__ intbuf         // [n_w * n_k * n_s * 6]
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -315,19 +316,19 @@ __global__ void gw_kernel(
     double zz_r1, zz_i1, zz_r2, zz_i2;
     double _u, _v;   // placeholders for unused outputs
     filon_u<true,false>(s, Sqrt1mkk, w, -1., 1.,
-                        t_cut, t_m, t_0, t_max, cutoff_type,
+                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor,
                         zz_r1, zz_i1, _u, _v, _u, _v, _u, _v);
     filon_u<true,false>(s, Sqrt1mkk, w, +1., 0.,
-                        t_cut, t_m, t_0, t_max, cutoff_type,
+                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor,
                         zz_r2, zz_i2, _u, _v, _u, _v, _u, _v);
 
     double xx1, xi1, yy1, yi1, xz1, xzi1;
     double xx2, xi2, yy2, yi2, xz2, xzi2;
     filon_u<false,true>(s_off, Sqrt1mkk, w, -1., 1.,
-                        t_cut, t_m, t_0, t_max, cutoff_type,
+                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor,
                         _u, _v, xx1, xi1, yy1, yi1, xz1, xzi1);
     filon_u<false,true>(s_off, Sqrt1mkk, w, +1., 0.,
-                        t_cut, t_m, t_0, t_max, cutoff_type,
+                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor,
                         _u, _v, xx2, xi2, yy2, yi2, xz2, xzi2);
 
     // --- z-integrals ---
@@ -386,14 +387,15 @@ __global__ void gw_kernel(
 // ---------------------------------------------------------------------------
 
 GpuIntegrator::GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
-                              const Setup &setup, int /*param*/)
+                              const Setup &setup, int param)
     : n_k_(setup.n_k), n_w_(setup.n_w),
       ds_(setup.ds * setup.how_often_ds),
       dz_(std::abs(setup.z[1] - setup.z[0])),
       t_cut_base_(setup.t_cut), t_m_base_(setup.t_m),
       t_max_base_(setup.t_max), t_0_(setup.t_0),
       d_(setup.d), cutoff_type_(setup.cutoff_type),
-      z_(setup.z), wlist_(setup.wlist), times_(setup.times)
+      z_(setup.z), wlist_(setup.wlist), times_(setup.times),
+      param_floor_(param > 0 ? (param + 1) & ~1 : -1)
 {
     n_z_ = z_.size();
     n_s_ = input_phi.size();
@@ -463,8 +465,17 @@ std::vector<double> GpuIntegrator::Compute(int i_t) const
     double t_m    = t_m_base_   - shift;
     double t_max  = t_max_base_ - shift;
 
+    if (param_floor_ > 0) {
+        n_floor_ = param_floor_;
+    } else {
+        // Adaptive floor: 64 panels/oscillation at k=0, w=w_max, at the split point.
+        const double w_max = wlist_.back();
+        n_floor_ = (std::max(128, (int)(64.0 * w_max * t_cut / (2.0 * M_PI)) + 2) + 1) & ~1;
+    }
+
     std::cout << "GpuIntegrator::Compute i_t=" << i_t
-              << " shift=" << shift << " t_m=" << t_m << "\n";
+              << " shift=" << shift << " t_m=" << t_m
+              << " n_floor=" << n_floor_ << "\n";
 
     std::size_t total = n_w_ * n_k_ * n_s_;
     CUDA_CHECK(cudaMemset(d_intbuf_, 0, total * 6 * sizeof(double)));
@@ -479,7 +490,7 @@ std::vector<double> GpuIntegrator::Compute(int i_t) const
         ds_, dz_,
         d_z_, d_w_, d_k_, d_s_,
         t_cut, t_m, t_0_, t_max,
-        cutoff_type_,
+        cutoff_type_, n_floor_,
         d_intbuf_
     );
     CUDA_CHECK(cudaGetLastError());

@@ -19,7 +19,8 @@
 
 class GpuIntegrator {
 public:
-    // param is ignored (GPU uses compiled-in N_MIN); present for interface parity
+    // param > 0: use param directly as n_floor (same as --param N for CPU Filon)
+    // param <= 0: compute adaptive floor from 64*w_max*t_cut/(2π)
     GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
                   const Setup &setup, int param = -1);
     ~GpuIntegrator();
@@ -43,6 +44,9 @@ private:
     int cutoff_type_;
 
     std::vector<double> wlist_, slist_, z_, times_, klist_;
+
+    int         param_floor_ = -1;  // from constructor param; -1 → adaptive
+    mutable int n_floor_ = 0;       // resolved each Compute()
 
     // Device arrays (allocated in constructor, freed in destructor)
     double *d_phi_    = nullptr;   // [n_s * n_z]
