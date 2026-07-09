@@ -465,13 +465,7 @@ std::vector<double> GpuIntegrator::Compute(int i_t) const
     double t_m    = t_m_base_   - shift;
     double t_max  = t_max_base_ - shift;
 
-    if (param_floor_ > 0) {
-        n_floor_ = param_floor_;
-    } else {
-        // Adaptive floor: 64 panels/oscillation at k=0, w=w_max, at the split point.
-        const double w_max = wlist_.back();
-        n_floor_ = (std::max(128, (int)(64.0 * w_max * t_cut / (2.0 * M_PI)) + 2) + 1) & ~1;
-    }
+    n_floor_ = param_floor_ > 0 ? param_floor_ : 8192;
 
     std::cout << "GpuIntegrator::Compute i_t=" << i_t
               << " shift=" << shift << " t_m=" << t_m

@@ -20,7 +20,7 @@
 class GpuIntegrator {
 public:
     // param > 0: use param directly as n_floor (same as --param N for CPU Filon)
-    // param <= 0: compute adaptive floor from 64*w_max*t_cut/(2π)
+    // param <= 0: default n_floor = 8192
     GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
                   const Setup &setup, int param = -1);
     ~GpuIntegrator();
