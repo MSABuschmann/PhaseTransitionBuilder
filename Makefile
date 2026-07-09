@@ -7,7 +7,7 @@ WEIGHTS      = cpp/weights
 
 PYTHON   := python3.11
 PY_EXT   := $(shell $(PYTHON)-config --extension-suffix)
-PY_INC   := $(shell $(PYTHON)-config --includes) -Iextern/pybind11/include
+PY_INC   := $(shell $(PYTHON) -m pybind11 --includes)
 
 .PHONY: all clean bubblemaster bubblemaster_filon bubblemaster_gpu solver_1d weights _potential
 

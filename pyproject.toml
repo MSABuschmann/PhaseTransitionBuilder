@@ -12,6 +12,7 @@ dependencies = [
     "h5py",
     "matplotlib",
     "cosmoTransitions",
+    "pybind11",
 ]
 
 [tool.setuptools.packages.find]
