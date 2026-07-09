@@ -14,7 +14,7 @@ Canonical workflow (see notebooks/):
 
 from .config      import Config
 from .physics     import (Potential, Phi4Potential, Phi4PiecewisePotential,
-                           PolynomialPotential,
+                           PolynomialPotential, potential_from_hdf5,
                            InstantonProfile, BubbleKinematics, PhysicsModel)
 from .nucleation  import (NucleationRate, UniformNucleation,
                            ExponentialNucleation, FixedNucleation,
@@ -32,6 +32,7 @@ __all__ = [
     "Config",
     # physics
     "Potential", "Phi4Potential", "Phi4PiecewisePotential", "PolynomialPotential",
+    "potential_from_hdf5",
     "InstantonProfile", "BubbleKinematics", "PhysicsModel",
     # nucleation
     "NucleationRate", "UniformNucleation", "ExponentialNucleation",

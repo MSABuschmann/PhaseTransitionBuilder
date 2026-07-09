@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "../../common/hdf5_utils.h"
-#include "../../common/potential.h"
+#include "../../common/potential_io.h"
 
 class Setup {
 public:
@@ -32,7 +32,7 @@ public:
         smax         = read_attr_double(file, "smax");
 
         // --- potential ---
-        potential = Potential::from_hdf5(file.openGroup("potential"));
+        potential = potential_from_hdf5(file.openGroup("potential"));
 
         // --- datasets ---
         z     = read_vector(file, "z");

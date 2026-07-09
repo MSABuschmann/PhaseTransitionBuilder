@@ -16,7 +16,7 @@ Solver1D::Solver1D(const std::string &setup_path) {
     dt_    = dr_ * 0.5;
     t_     = 0.;
 
-    potential_ = Potential::from_hdf5(file.openGroup("potential"));
+    potential_ = potential_from_hdf5(file.openGroup("potential"));
 
     // Read instanton profile and interpolate onto our r grid
     // (written by Python physics.py _save_instanton: R and Phi at top level)

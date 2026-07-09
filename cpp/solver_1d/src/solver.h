@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "../../common/potential.h"
+#include "../../common/potential_io.h"
 
 // 1D spherical leapfrog solver for a single expanding bubble.
 // Used for validation against the Python-based field evolution in ic.py.
