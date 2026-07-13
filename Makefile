@@ -5,7 +5,7 @@ BUBBLEMASTER = cpp/bubblemaster
 SOLVER_1D    = cpp/solver_1d
 WEIGHTS      = cpp/weights
 
-PYTHON   := python3.11
+PYTHON   := python3
 PY_EXT   := $(shell $(PYTHON)-config --extension-suffix)
 PY_INC   := $(shell $(PYTHON) -m pybind11 --includes)
 
