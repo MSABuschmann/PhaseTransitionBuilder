@@ -20,7 +20,8 @@ from .nucleation  import (NucleationRate, UniformNucleation,
                            ExponentialNucleation, FixedNucleation,
                            BubbleEvent, CollisionEvent, BubblePopulation)
 from .ic          import (BubbleMasterParams, write_2d_setup, write_3d_bubbles)
-from .scan        import (ScanConfig, ScanResult, run_scan, load_scan)
+from .scan        import (ScanConfig, ScanResult, run_scan, load_scan,
+                          load_bm_result)
 from .sim2d       import (run_bubblemaster, run_solver_1d, run_weights)
 from .analysis    import (bootstrap_spectrum, load_weights,
                            sledgehamr_normalization, bubblemaster_normalization,
@@ -40,7 +41,7 @@ __all__ = [
     # ic
     "BubbleMasterParams", "write_2d_setup", "write_3d_bubbles",
     # scan
-    "ScanConfig", "ScanResult", "run_scan", "load_scan",
+    "ScanConfig", "ScanResult", "run_scan", "load_scan", "load_bm_result",
     # sim2d
     "run_bubblemaster", "run_solver_1d", "run_weights",
     # analysis

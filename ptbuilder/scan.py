@@ -129,6 +129,12 @@ def run_scan(model, scan_config: ScanConfig, config=None,
     return results
 
 
+def load_bm_result(output_dir: Path, gamma: float,
+                   times: np.ndarray) -> ScanResult:
+    """Load a single BubbleMaster run from its output directory."""
+    return _read_bubblemaster_output(Path(output_dir), gamma, times)
+
+
 def load_scan(cache_path: Path) -> Dict[float, ScanResult]:
     """Load a previously saved scan cache."""
     cache_path = Path(cache_path)
