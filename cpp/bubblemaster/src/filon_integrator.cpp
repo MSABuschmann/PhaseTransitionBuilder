@@ -67,8 +67,6 @@ std::vector<double> FilonIntegrator::Compute(int i_t) const {
     std::vector<double> result(n_w_);
     for (std::size_t i_w = 0; i_w < n_w_; ++i_w) {
         result[i_w] = k_integral(wlist_[i_w], t_cut, t_m, t_max);
-        std::cout << "  w=" << wlist_[i_w]
-                  << " spec=" << result[i_w] << "\n";
     }
     return result;
 }

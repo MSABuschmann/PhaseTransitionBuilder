@@ -533,7 +533,6 @@ std::vector<double> GpuIntegrator::Compute(int i_t) const
         }
 
         spectrum[iw] = int_k;
-        std::cout << "  w=" << w << " spec=" << int_k << "\n";
     }
 
     return spectrum;
