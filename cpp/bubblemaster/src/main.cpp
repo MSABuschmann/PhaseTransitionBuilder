@@ -1,3 +1,4 @@
+#include <chrono>
 #include <iostream>
 #include <string>
 
@@ -15,7 +16,15 @@
 #  include "integrator.h"
 #endif
 
+using Clock = std::chrono::steady_clock;
+using Sec   = std::chrono::duration<double>;
+
+static double elapsed(Clock::time_point t0) {
+    return Sec(Clock::now() - t0).count();
+}
+
 int main(int argc, char *argv[]) {
+    auto t_start = Clock::now();
     if (argc < 3) {
         std::cerr << "Usage: bubblemaster <setup.h5> <output_dir/>"
                      " [--save-fields] [--param N]\n"
@@ -44,8 +53,10 @@ int main(int argc, char *argv[]) {
     Setup setup(setup_path);
 
     // --- 2. Run 2D Milne evolution ---
+    auto t_evo = Clock::now();
     Evolution evo(setup);
     const auto &phi_snaps = evo.GetPhi();
+    std::cout << "Evolution: " << elapsed(t_evo) << " s\n";
 
     if (save_fields)
         SaveFields(output_dir, phi_snaps, evo.GetSlist(), setup.z);
@@ -55,12 +66,16 @@ int main(int argc, char *argv[]) {
     const auto &wlist = integrator.GetW();
 
     const int n_t = setup.n_t;
+    auto t_integ = Clock::now();
     for (int i_t = 0; i_t < n_t; ++i_t) {
-        std::cout << "\n=== Time index " << i_t << " / " << n_t - 1 << " ===\n";
+        auto t_it = Clock::now();
         std::vector<double> spectrum = integrator.Compute(i_t);
         SaveStepResult(output_dir, i_t, wlist, spectrum);
+        std::cout << "Time index " << i_t << " / " << n_t - 1
+                  << ": " << elapsed(t_it) << " s\n";
     }
+    std::cout << "Integration total: " << elapsed(t_integ) << " s\n";
 
-    std::cout << "\nDone.\n";
+    std::cout << "Total: " << elapsed(t_start) << " s\n";
     return 0;
 }
