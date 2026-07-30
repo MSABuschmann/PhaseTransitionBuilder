@@ -7,12 +7,27 @@ import h5py
 import numpy as np
 from scipy import interpolate, optimize
 
-from ptbuilder._potential import (
-    Potential,
-    Phi4Potential as _Phi4Potential,
-    Phi4PiecewisePotential as _Phi4PiecewisePotential,
-    PolynomialPotential as _PolynomialPotential,
-)
+try:
+    from ptbuilder._potential import (
+        Potential,
+        Phi4Potential as _Phi4Potential,
+        Phi4PiecewisePotential as _Phi4PiecewisePotential,
+        PolynomialPotential as _PolynomialPotential,
+    )
+    _POTENTIAL_AVAILABLE = True
+except ImportError:
+    _POTENTIAL_AVAILABLE = False
+
+    class Potential:  # type: ignore[no-redef]
+        def __init__(self, *a, **kw):
+            raise ImportError(
+                "ptbuilder._potential (C++ extension) is not compiled. "
+                "Run `make` from the repo root to build it."
+            )
+
+    _Phi4Potential           = Potential
+    _Phi4PiecewisePotential  = Potential
+    _PolynomialPotential     = Potential
 
 
 # ---------------------------------------------------------------------------

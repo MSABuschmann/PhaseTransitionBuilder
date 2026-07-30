@@ -3,9 +3,9 @@ reference_codes/
 
 # C++ build artifacts
 cpp/*/build/
-cpp/*/*.o
-cpp/*/*.a
-cpp/*/*.so
+cpp/**/*.o
+cpp/**/*.a
+cpp/**/*.so
 bin/
 
 # Python
@@ -25,6 +25,17 @@ notebooks/.ipynb_checkpoints/
 results/
 data/
 *.h5
+
+# Local simulation data — never push
+sledgehamr_runs/
+download/
+
+# Claude Code auto-memory
+.claude/
+
+# C++ compiled binaries (object files covered above)
+cpp/weights/weights
+cpp/bubblemaster/bubblemaster
 
 # Generated scripts and logs
 scripts/

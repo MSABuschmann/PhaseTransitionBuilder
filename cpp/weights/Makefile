@@ -1,13 +1,28 @@
-CXX      = CC
-CXXFLAGS = -std=c++17 -O3 -fopenmp -ffast-math -Wall -Wextra -Wno-sign-compare
+UNAME_S := $(shell uname -s)
 
-HDF5_INCLUDE = ${HDF5_DIR}/include
-HDF5_LIB     = ${HDF5_DIR}/lib
+ifeq ($(UNAME_S),Darwin)
+  BREW         := $(shell brew --prefix 2>/dev/null || echo /opt/homebrew)
+  CXX          = $(BREW)/opt/llvm/bin/clang++
+  HDF5_INCLUDE = $(BREW)/opt/hdf5/include
+  HDF5_LIB     = $(BREW)/opt/hdf5/lib
+  EIGEN_INC    = $(shell find $(BREW)/Cellar/eigen -name "eigen3" -type d 2>/dev/null | head -1)
+  OMP_INC      = $(BREW)/opt/libomp/include
+  OMP_LIB      = $(BREW)/opt/libomp/lib
+  OMP_FLAGS    = -I$(OMP_INC) -L$(OMP_LIB)
+else
+  CXX          = CC
+  HDF5_INCLUDE = $(HDF5_DIR)/include
+  HDF5_LIB     = $(HDF5_DIR)/lib
+  EIGEN_INC    = $(shell pkg-config --variable=includedir eigen3 2>/dev/null)/eigen3
+  OMP_FLAGS    =
+endif
+
+CXXFLAGS = -std=c++17 -O3 -fopenmp -ffast-math -Wall -Wextra -Wno-sign-compare $(OMP_FLAGS)
 
 INCLUDES = -I../../common \
            -I$(HDF5_INCLUDE) \
-           $(shell pkg-config --cflags eigen3 2>/dev/null || echo "-I/usr/local/include/eigen3")
-LIBS     = -L$(HDF5_LIB) -lhdf5_cpp -lhdf5 -lm -fopenmp
+           -I$(EIGEN_INC)
+LIBS     = -L$(HDF5_LIB) -lhdf5_cpp -lhdf5 -lm -fopenmp $(OMP_FLAGS)
 
 SRCDIR   = src
 SRCS     = $(SRCDIR)/main.cpp \

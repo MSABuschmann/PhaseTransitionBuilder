@@ -23,10 +23,11 @@ from .ic          import (BubbleMasterParams, write_2d_setup, write_3d_bubbles)
 from .scan        import (ScanConfig, ScanResult, run_scan, load_scan,
                           load_bm_result)
 from .sim2d       import (run_bubblemaster, run_solver_1d, run_weights)
-from .analysis    import (bootstrap_spectrum, load_weights,
+from .analysis    import (bootstrap_spectrum, load_weights, write_weights_input,
                            sledgehamr_normalization, bubblemaster_normalization,
                            build_scan_interpolator, sledgehamr_spectrum_range)
-from .sledgehamr  import (load_output, get_gw_spectrum, get_final_spectrum)
+from .sledgehamr  import (load_output, get_gw_spectrum, get_final_spectrum,
+                           get_spectrum_at_time)
 
 __all__ = [
     # config
@@ -45,9 +46,9 @@ __all__ = [
     # sim2d
     "run_bubblemaster", "run_solver_1d", "run_weights",
     # analysis
-    "bootstrap_spectrum", "load_weights",
+    "bootstrap_spectrum", "load_weights", "write_weights_input",
     "sledgehamr_normalization", "bubblemaster_normalization",
     "build_scan_interpolator", "sledgehamr_spectrum_range",
     # sledgehamr
-    "load_output", "get_gw_spectrum", "get_final_spectrum",
+    "load_output", "get_gw_spectrum", "get_final_spectrum", "get_spectrum_at_time",
 ]

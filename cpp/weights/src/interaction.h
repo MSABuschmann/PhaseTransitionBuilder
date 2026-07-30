@@ -5,9 +5,10 @@
 
 struct WeightsSetup {
     double L;
+    double rout_0, rin_0;             // outer/inner wall radii at t=0
     int    n_t, n_b;
     std::vector<double>          t;    // time points  [n_t]
-    std::vector<double>          R;    // wall radius  [n_t]
+    std::vector<double>          R;    // outer wall radius R_out(t) [n_t]
     std::vector<Eigen::Vector3d> pos;  // positions    [n_b]
 };
 

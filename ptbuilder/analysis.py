@@ -101,13 +101,15 @@ def load_weights(path: Path, n_t: int) -> tuple:
     weights : (n_collisions, n_t) array of geometric weights
     pair_i  : (n_collisions,) integer index of first bubble in each pair
     pair_j  : (n_collisions,) integer index of second bubble in each pair
+    gammas  : (n_collisions,) Lorentz factor per pair, or None if not in file
     """
     with h5py.File(path, "r") as f:
         flat   = f["weights"][:]
         pair_i = f["pair_i"][:].astype(int)
         pair_j = f["pair_j"][:].astype(int)
+        gammas = f["gamma"][:] if "gamma" in f else None
     n_coll = len(flat) // n_t
-    return flat.reshape(n_coll, n_t), pair_i, pair_j
+    return flat.reshape(n_coll, n_t), pair_i, pair_j, gammas
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +198,49 @@ def bootstrap_spectrum(scan_results: Dict[float, "ScanResult"],
         combined *= norm
 
     return k_out, combined
+
+
+# ---------------------------------------------------------------------------
+# Weights input writer
+# ---------------------------------------------------------------------------
+
+def write_weights_input(path: Path, positions: np.ndarray, t: np.ndarray,
+                         kinematics, L: float, t_init: float = 0.) -> None:
+    """
+    Write the input HDF5 expected by the cpp/weights binary.
+
+    R(t) is computed using the outer wall radius (rout_0), consistent with
+    the collision_time / Gamma definitions throughout the codebase.
+    rout_0 and rin_0 are stored as attributes so the binary can compute
+    the Lorentz factor gamma analytically for each colliding pair.
+
+    Parameters
+    ----------
+    path       : output file path
+    positions  : (n_b, 3) bubble positions in [0, L)
+    t          : time array (n_t,)
+    kinematics : BubbleKinematics instance
+    L          : box side length
+    t_init     : nucleation time (default 0)
+    """
+    positions = np.asarray(positions, dtype=float)
+    t         = np.asarray(t,         dtype=float)
+    n_b, n_t  = len(positions), len(t)
+    R         = kinematics.R(t, t_init=t_init, r='out')
+    rout_0    = float(kinematics.profile.rout_0)
+    rin_0     = float(kinematics.profile.rin_0)
+
+    with h5py.File(path, "w") as f:
+        f.attrs["L"]      = float(L)
+        f.attrs["n_t"]    = int(n_t)
+        f.attrs["n_b"]    = int(n_b)
+        f.attrs["rout_0"] = rout_0
+        f.attrs["rin_0"]  = rin_0
+        f.create_dataset("t",     data=t)
+        f.create_dataset("R",     data=np.asarray(R, dtype=float))
+        f.create_dataset("xlocs", data=positions[:, 0])
+        f.create_dataset("ylocs", data=positions[:, 1])
+        f.create_dataset("zlocs", data=positions[:, 2])
 
 
 # ---------------------------------------------------------------------------

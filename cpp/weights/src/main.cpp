@@ -22,11 +22,13 @@
 static WeightsSetup read_setup(const std::string &path) {
     H5::H5File file(path, H5F_ACC_RDONLY);
     WeightsSetup s;
-    s.L   = read_attr_double(file, "L");
-    s.n_t = read_attr_int   (file, "n_t");
-    s.n_b = read_attr_int   (file, "n_b");
-    s.t   = read_vector(file, "t");
-    s.R   = read_vector(file, "R");
+    s.L      = read_attr_double(file, "L");
+    s.rout_0 = read_attr_double(file, "rout_0");
+    s.rin_0  = read_attr_double(file, "rin_0");
+    s.n_t    = read_attr_int   (file, "n_t");
+    s.n_b    = read_attr_int   (file, "n_b");
+    s.t      = read_vector(file, "t");
+    s.R      = read_vector(file, "R");
     auto xs = read_vector(file, "xlocs");
     auto ys = read_vector(file, "ylocs");
     auto zs = read_vector(file, "zlocs");
@@ -58,6 +60,31 @@ int main(int argc, char *argv[]) {
     int n_pairs = static_cast<int>(collision_pairs.size());
     std::cout << "Collisions found: " << n_pairs << "\n";
 
+    // Compute gamma per pair analytically.
+    // Collision: outer walls touch → d = 2*R_out(t_m), so R_out(t_m) = d/2.
+    // Gamma = (rout_0 - rin_0) / (R_out(t_m) - R_in(t_m))
+    //       = (rout_0 - rin_0) / (d/2 - sqrt(rin_0^2 + t_m^2))
+    // where t_m = sqrt(d^2/4 - rout_0^2).
+    // d uses the minimum-image convention for periodic boundary conditions.
+    const double rout_0 = setup.rout_0;
+    const double rin_0  = setup.rin_0;
+    const double L      = setup.L;
+    const double w0     = rout_0 - rin_0;
+
+    std::vector<double> pair_i(n_pairs), pair_j(n_pairs), gammas(n_pairs);
+    for (int p = 0; p < n_pairs; ++p) {
+        pair_i[p] = collision_pairs[p].first;
+        pair_j[p] = collision_pairs[p].second;
+
+        Eigen::Vector3d dp = setup.pos[pair_i[p]] - setup.pos[pair_j[p]];
+        for (int k = 0; k < 3; ++k)
+            dp[k] -= L * std::round(dp[k] / L);
+        double d      = dp.norm();
+        double tm_sq  = std::max(0., d*d/4. - rout_0*rout_0);
+        double R_in_m = std::sqrt(rin_0*rin_0 + tm_sq);
+        gammas[p]     = w0 / (d/2. - R_in_m);
+    }
+
     // Write output
     H5::H5File out(out_path, H5F_ACC_TRUNC);
 
@@ -65,14 +92,9 @@ int main(int argc, char *argv[]) {
     write_attr_int(out, "n_t",     setup.n_t);
 
     write_vector(out, "weights", flat_weights);
-
-    std::vector<double> pair_i(n_pairs), pair_j(n_pairs);
-    for (int p = 0; p < n_pairs; ++p) {
-        pair_i[p] = collision_pairs[p].first;
-        pair_j[p] = collision_pairs[p].second;
-    }
-    write_vector(out, "pair_i", pair_i);
-    write_vector(out, "pair_j", pair_j);
+    write_vector(out, "pair_i",  pair_i);
+    write_vector(out, "pair_j",  pair_j);
+    write_vector(out, "gamma",   gammas);
 
     std::cout << "Done.\n";
     return 0;
