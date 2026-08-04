@@ -13,7 +13,7 @@ else
   CXX          = CC
   HDF5_INCLUDE = $(HDF5_DIR)/include
   HDF5_LIB     = $(HDF5_DIR)/lib
-  EIGEN_INC    = $(shell pkg-config --variable=includedir eigen3 2>/dev/null)/eigen3
+  EIGEN_INC    = $(or $(shell pkg-config --variable=includedir eigen3 2>/dev/null),/usr/include)/eigen3
   OMP_FLAGS    =
 endif
 
