@@ -8,6 +8,53 @@ import h5py
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 
+_ASSETS_DIR = Path(__file__).parent / "assets"
+_KEFF_PATH  = _ASSETS_DIR / "keff.npy"
+
+# ---------------------------------------------------------------------------
+# keff² correction (lattice momentum correction for sledgehamr output)
+# ---------------------------------------------------------------------------
+
+_keffsq_cache: Optional[dict] = None
+
+
+def _compute_keff(dim: int) -> np.ndarray:
+    """Compute mean |k| per integer shell for a cubic lattice of side `dim`."""
+    kmax  = int(np.sqrt(3) / 2 * dim + 0.5) + 1
+    k_sum = np.zeros(kmax)
+    count = np.zeros(kmax)
+    b = np.fft.fftfreq(dim) * dim
+    c = np.fft.fftfreq(dim) * dim
+    B2C2 = b[:, None] ** 2 + c[None, :] ** 2
+    for a in range(dim // 2 + 1):
+        ka   = a if a < dim // 2 else a - dim
+        mult = 1.0 if (a == 0 or a == dim // 2) else 2.0
+        k_mag = np.sqrt(ka * ka + B2C2)
+        k_bin = np.floor(k_mag + 0.5).astype(np.int64)
+        k_sum += np.bincount(k_bin.ravel(), weights=(mult * k_mag).ravel(),    minlength=kmax)
+        count += np.bincount(k_bin.ravel(), weights=np.full(k_bin.size, mult), minlength=kmax)
+    return k_sum / count
+
+
+def apply_keffsq(k_int: np.ndarray) -> np.ndarray:
+    """
+    Return the keff² correction array for a sledgehamr k array.
+
+    The box size N is inferred from the number of k bins. If the entry is not
+    yet cached in ptbuilder/data/keff.npy it is computed on the fly and saved
+    for future calls. Multiply k_int by sqrt(apply_keffsq(k_int)) to get the
+    corrected k axis.
+    """
+    global _keffsq_cache
+    if _keffsq_cache is None:
+        _keffsq_cache = (np.load(_KEFF_PATH, allow_pickle=True).item()
+                         if _KEFF_PATH.exists() else {})
+    N = 2 ** int(round(np.log2(2 * (len(k_int) - 1) / np.sqrt(3))))
+    if N not in _keffsq_cache:
+        _keffsq_cache[N] = _compute_keff(N) ** 2
+        np.save(_KEFF_PATH, _keffsq_cache)
+    return _keffsq_cache[N]
+
 
 # ---------------------------------------------------------------------------
 # Normalization helpers

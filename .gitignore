@@ -24,6 +24,7 @@ notebooks/.ipynb_checkpoints/
 # HDF5 outputs / simulation results
 results/
 data/
+!ptbuilder/assets/
 *.h5
 
 # Local simulation data — never push

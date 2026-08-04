@@ -25,7 +25,8 @@ from .scan        import (ScanConfig, ScanResult, run_scan, load_scan,
 from .sim2d       import (run_bubblemaster, run_solver_1d, run_weights)
 from .analysis    import (bootstrap_spectrum, load_weights, write_weights_input,
                            sledgehamr_normalization, bubblemaster_normalization,
-                           build_scan_interpolator, sledgehamr_spectrum_range)
+                           build_scan_interpolator, sledgehamr_spectrum_range,
+                           apply_keffsq)
 from .sledgehamr  import (load_output, get_gw_spectrum, get_final_spectrum,
                            get_spectrum_at_time)
 
@@ -49,6 +50,7 @@ __all__ = [
     "bootstrap_spectrum", "load_weights", "write_weights_input",
     "sledgehamr_normalization", "bubblemaster_normalization",
     "build_scan_interpolator", "sledgehamr_spectrum_range",
+    "apply_keffsq",
     # sledgehamr
     "load_output", "get_gw_spectrum", "get_final_spectrum", "get_spectrum_at_time",
 ]
