@@ -7,19 +7,21 @@ from pathlib import Path
 
 def run_bubblemaster(setup_path: Path, output_dir: Path, config,
                      save_fields: bool = False,
+                     save_amplitude: bool = False,
                      timeout: int = 3600) -> None:
     """
     Run the bubblemaster binary for a single setup file.
 
-    Signature: ./bubblemaster <setup.h5> <output_dir/> [--save-fields]
+    Signature: ./bubblemaster <setup.h5> <output_dir/> [--save-fields] [--save-amplitude]
 
     Parameters
     ----------
-    setup_path  : path to the HDF5 setup file written by write_2d_setup()
-    output_dir  : directory where result_*.h5 files will be written
-    config      : Config instance (provides bubblemaster_bin path)
-    save_fields : if True, pass --save-fields to also write fields.h5
-    timeout     : max wall time in seconds (default 1 hour)
+    setup_path      : path to the HDF5 setup file written by write_2d_setup()
+    output_dir      : directory where result_*.h5 files will be written
+    config          : Config instance (provides bubblemaster_bin path)
+    save_fields     : if True, pass --save-fields to also write fields.h5
+    save_amplitude  : if True, pass --save-amplitude to also store Re/Im A(w,k)
+    timeout         : max wall time in seconds (default 1 hour)
     """
     config.check_binaries()
     output_dir = Path(output_dir)
@@ -32,6 +34,8 @@ def run_bubblemaster(setup_path: Path, output_dir: Path, config,
     ]
     if save_fields:
         cmd.append("--save-fields")
+    if save_amplitude:
+        cmd.append("--save-amplitude")
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:

@@ -27,19 +27,23 @@ int main(int argc, char *argv[]) {
     auto t_start = Clock::now();
     if (argc < 3) {
         std::cerr << "Usage: bubblemaster <setup.h5> <output_dir/>"
-                     " [--save-fields] [--param N]\n"
-                     "  --param N  Filon: N_min panels; GSL: subinterval limit\n";
+                     " [--save-fields] [--save-amplitude] [--param N]\n"
+                     "  --param N         Filon: N_min panels; GSL: subinterval limit\n"
+                     "  --save-amplitude  Also write Re/Im A(w,cos_theta) to result files\n";
         return 1;
     }
 
     const std::string setup_path = argv[1];
     const std::string output_dir = argv[2];
-    bool save_fields = false;
-    int  qual_param  = -1;   // -1 → use compiled default
+    bool save_fields    = false;
+    bool save_amplitude = false;
+    int  qual_param     = -1;   // -1 → use compiled default
     for (int i = 3; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--save-fields")
             save_fields = true;
+        else if (a == "--save-amplitude")
+            save_amplitude = true;
         else if (a == "--param" && i + 1 < argc)
             qual_param = std::atoi(argv[++i]);
     }
@@ -48,6 +52,8 @@ int main(int argc, char *argv[]) {
     std::cout << "Output: " << output_dir << "\n";
     if (save_fields)
         std::cout << "Saving fields\n";
+    if (save_amplitude)
+        std::cout << "Saving complex amplitude A(w, cos_theta)\n";
 
     // --- 1. Load setup ---
     Setup setup(setup_path);
@@ -69,8 +75,13 @@ int main(int argc, char *argv[]) {
     auto t_integ = Clock::now();
     for (int i_t = 0; i_t < n_t; ++i_t) {
         auto t_it = Clock::now();
-        std::vector<double> spectrum = integrator.Compute(i_t);
-        SaveStepResult(output_dir, i_t, wlist, spectrum);
+        if (save_amplitude) {
+            AmplitudeResult res = integrator.ComputeAmplitude(i_t);
+            SaveAmplitudeResult(output_dir, i_t, res);
+        } else {
+            std::vector<double> spectrum = integrator.Compute(i_t);
+            SaveStepResult(output_dir, i_t, wlist, spectrum);
+        }
         std::cout << "Time index " << i_t << " / " << n_t - 1
                   << ": " << elapsed(t_it) << " s\n";
     }

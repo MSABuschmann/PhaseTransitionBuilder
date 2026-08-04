@@ -33,7 +33,18 @@ OBJS_GSL   = $(SRCS_GSL:.cpp=_gsl.o)
 OBJS_FILON = $(SRCS_FILON:.cpp=_filon.o)
 OBJS_GPU   = $(SRCS_GPU:.cpp=_gpu.o) $(SRCDIR)/gpu_integrator_gpu.o
 
-.PHONY: all gsl filon gpu clean
+# Local macOS build (Homebrew clang + libomp + HDF5 + GSL)
+CXX_LOCAL      = clang++
+HDF5_LOCAL     = /opt/homebrew/opt/hdf5
+GSL_LOCAL      = /opt/homebrew/opt/gsl
+LIBOMP_LOCAL   = /opt/homebrew/opt/libomp
+CXXFLAGS_LOCAL = -std=c++17 -O2 -Xpreprocessor -fopenmp -ffast-math -Wno-sign-compare \
+                 -I$(LIBOMP_LOCAL)/include -I$(GSL_LOCAL)/include
+LIBS_LOCAL     = -L$(HDF5_LOCAL)/lib -lhdf5_cpp -lhdf5 \
+                 -L$(GSL_LOCAL)/lib -lgsl -lgslcblas \
+                 -L$(LIBOMP_LOCAL)/lib -lomp -lm
+
+.PHONY: all gsl filon gpu local clean
 
 all: gsl filon gpu
 
@@ -44,6 +55,12 @@ gpu:   bubblemaster_gpu
 # --- GSL build ---
 bubblemaster: $(OBJS_GSL)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS_GSL)
+
+# --- Local macOS build: single-step compile+link, no separate .o files ---
+.PHONY: local
+local:
+	$(CXX_LOCAL) $(CXXFLAGS_LOCAL) -I../../common -I$(HDF5_LOCAL)/include \
+	    -o bubblemaster $(SRCS_GSL) $(LIBS_LOCAL)
 
 $(SRCDIR)/%_gsl.o: $(SRCDIR)/%.cpp
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c -o $@ $<

@@ -168,13 +168,49 @@ void FilonIntegrator::integral_u_filon(double s, double Sqrt1mkk, double w,
 }
 
 // ---------------------------------------------------------------------------
+// ComputeAmplitude: like Compute but retains pre-squaring A(w, cos_theta)
+// ---------------------------------------------------------------------------
+
+AmplitudeResult FilonIntegrator::ComputeAmplitude(int i_t) const {
+    double shift = t_m_base_ - times_[i_t];
+    double t_cut = t_cut_base_ - shift;
+    double t_m   = t_m_base_  - shift;
+    double t_max = t_max_base_ - shift;
+
+    std::cout << "ComputeAmplitude i_t=" << i_t
+              << " shift=" << shift
+              << " t_cut=" << t_cut
+              << " t_m="   << t_m   << "\n";
+
+    AmplitudeResult res;
+    res.w      = wlist_;
+    res.klist  = linspace(0., 1., static_cast<int>(n_k_));
+    res.spectrum.resize(n_w_);
+    res.amp_re.resize(n_w_ * n_k_, 0.);
+    res.amp_im.resize(n_w_ * n_k_, 0.);
+
+    for (std::size_t i_w = 0; i_w < n_w_; ++i_w) {
+        std::vector<double> row_re(n_k_, 0.), row_im(n_k_, 0.);
+        res.spectrum[i_w] = k_integral(wlist_[i_w], t_cut, t_m, t_max,
+                                       &row_re, &row_im);
+        std::copy(row_re.begin(), row_re.end(),
+                  res.amp_re.begin() + i_w * n_k_);
+        std::copy(row_im.begin(), row_im.end(),
+                  res.amp_im.begin() + i_w * n_k_);
+    }
+    return res;
+}
+
+// ---------------------------------------------------------------------------
 // k integral
 // schedule(static) matches the first-touch schedule so the s-loop accesses
 // NUMA-local rows.
 // ---------------------------------------------------------------------------
 
 double FilonIntegrator::k_integral(double w,
-                                    double t_cut, double t_m, double t_max) const {
+                                    double t_cut, double t_m, double t_max,
+                                    std::vector<double> *out_amp_re,
+                                    std::vector<double> *out_amp_im) const {
     double int_k = 0.;
     auto klist   = linspace(0., 1., static_cast<int>(n_k_));
     const double dk = klist[1] - klist[0];
@@ -260,6 +296,7 @@ double FilonIntegrator::k_integral(double w,
 
         const double re = int_s_zz_real*Onemkk + int_s_xandy_real - TwokSqrt*int_s_xz_real;
         const double im = int_s_zz_imag*Onemkk + int_s_xandy_imag - TwokSqrt*int_s_xz_imag;
+        if (out_amp_re) { (*out_amp_re)[i_k] = re; (*out_amp_im)[i_k] = im; }
         intk[i_k] = (re*re + im*im) * w*w*w * 2.*M_PI;
 
         const double fk = (i_k == 0 || i_k == n_k_ - 1) ? 1. : 2.;

@@ -2,7 +2,7 @@
 Bootstrap GW spectrum: combine 2D scan results with collision weights.
 """
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import h5py
 import numpy as np
@@ -282,3 +282,264 @@ def sledgehamr_spectrum_range(output, t_min: float, t_max: float,
     elif agg == "min":  return k, all_spec.min(axis=0)
     elif agg == "max":  return k, all_spec.max(axis=0)
     else: raise ValueError(f"Unknown agg={agg!r}. Use 'mean', 'min', or 'max'.")
+
+
+# ---------------------------------------------------------------------------
+# Amplitude I/O  (requires --save-amplitude BubbleMaster output)
+# ---------------------------------------------------------------------------
+
+def load_amplitude_scan(output_dir: Path) -> dict:
+    """
+    Read all result_*.h5 files written with --save-amplitude and assemble
+    the complex amplitude scan.
+
+    Returns
+    -------
+    dict with keys:
+      'w'       : (n_w,)          frequency grid
+      'k'       : (n_k,)          cos(theta) grid, linspace(0,1,n_k)
+      'spectrum': (n_t, n_w)      direction-integrated power spectrum
+      'amp_re'  : (n_t, n_w, n_k) Re A(w, cos_theta) at each time step
+      'amp_im'  : (n_t, n_w, n_k) Im A(w, cos_theta)
+    """
+    output_dir = Path(output_dir)
+    result_files = sorted(output_dir.glob("result_*.h5"),
+                          key=lambda p: int(p.stem.split("_")[1]))
+    if not result_files:
+        raise FileNotFoundError(f"No result_*.h5 files in {output_dir}")
+
+    w = k = None
+    spec_list, re_list, im_list = [], [], []
+    for fpath in result_files:
+        with h5py.File(fpath, "r") as f:
+            if "amp_re" not in f:
+                raise KeyError(
+                    f"{fpath} has no 'amp_re' dataset — "
+                    "was BubbleMaster run with --save-amplitude?"
+                )
+            if w is None:
+                w = f["w"][:]
+                k = f["k"][:]
+            spec_list.append(f["spectrum"][:])
+            re_list.append(f["amp_re"][:])   # (n_w, n_k)
+            im_list.append(f["amp_im"][:])
+
+    return {
+        "w":        w,
+        "k":        k,
+        "spectrum": np.array(spec_list),    # (n_t, n_w)
+        "amp_re":   np.array(re_list),      # (n_t, n_w, n_k)
+        "amp_im":   np.array(im_list),      # (n_t, n_w, n_k)
+    }
+
+
+def check_amplitude_consistency(amp_scan: dict, rtol: float = 1e-4) -> bool:
+    """
+    Self-consistency check: verify that squaring the stored amplitude and
+    direction-integrating recovers the stored spectrum exactly.
+
+    Uses the same quadrature as BubbleMaster:
+      spectrum[i_w] = sum_k fk * dk * (re^2 + im^2) * w^3 * 2*pi
+    where fk=1 at the endpoints and fk=2 for interior points.
+
+    Returns True if all values agree within rtol, else raises AssertionError.
+    """
+    w       = amp_scan["w"]          # (n_w,)
+    k       = amp_scan["k"]          # (n_k,)
+    spec    = amp_scan["spectrum"]   # (n_t, n_w)
+    amp_re  = amp_scan["amp_re"]     # (n_t, n_w, n_k)
+    amp_im  = amp_scan["amp_im"]     # (n_t, n_w, n_k)
+
+    n_k = len(k)
+    dk  = k[1] - k[0]
+    fk  = np.full(n_k, 2.0)
+    fk[0] = fk[-1] = 1.0
+
+    # direction-integrate: (n_t, n_w)
+    power = (amp_re**2 + amp_im**2)          # (n_t, n_w, n_k)
+    spec_recon = (power * fk[None, None, :]).sum(axis=-1) * dk * w[None, :]**3 * 2 * np.pi
+
+    max_err = np.abs(spec_recon - spec).max()
+    max_val = np.abs(spec).max()
+    rel_err = max_err / max_val if max_val > 0 else max_err
+
+    if rel_err > rtol:
+        raise AssertionError(
+            f"Amplitude self-consistency FAILED: max relative error = {rel_err:.2e} "
+            f"(threshold {rtol:.2e}). Check C++ output."
+        )
+    print(f"Amplitude self-consistency OK: max rel error = {rel_err:.2e}")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Coherent reconstruction
+# ---------------------------------------------------------------------------
+
+def coherent_reconstruct(
+    amp_scan_grid: dict,
+    gammas_grid:   np.ndarray,
+    scan_times:    np.ndarray,
+    weights:       np.ndarray,
+    weights_times: np.ndarray,
+    gammas_pairs:  np.ndarray,
+    pair_axes:     np.ndarray,
+    pair_centers:  np.ndarray,
+    lambda_bar:    Optional[float] = None,
+    n_theta:       int = 64,
+    n_phi:         int = 128,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Coherent GW reconstruction accounting for inter-bubble interference.
+
+    For each pair p, compute the effective weighted complex amplitude:
+      A_p_eff(w, k) = sum_t w_p(t) * delta_amp(gamma_p, t, w, k)
+    then coherently sum over pairs for each sphere direction hat_k, and
+    integrate |A_total|^2 over the full sphere.
+
+    Parameters
+    ----------
+    amp_scan_grid  : output of build_amplitude_scan_grid()
+    gammas_grid    : (n_gamma,) scan gamma values
+    scan_times     : (n_t,) BM scan time points
+    weights        : (n_pairs, n_t_w) pair weight time series
+    weights_times  : (n_t_w,) time axis for weights
+    gammas_pairs   : (n_pairs,) Lorentz factor for each pair
+    pair_axes      : (n_pairs, 3) collision axis unit vectors (normalised)
+    pair_centers   : (n_pairs, 3) collision midpoint positions
+    lambda_bar     : if given, apply BubbleMaster normalisation
+    n_theta, n_phi : sphere quadrature resolution
+
+    Returns
+    -------
+    w     : (n_w,) frequency array
+    P_coh : (n_w,) coherent GW power spectrum
+    """
+    w       = amp_scan_grid["w"]             # (n_w,)
+    k       = amp_scan_grid["k"]             # (n_k,)
+    amp_re  = amp_scan_grid["amp_re"]        # (n_gamma, n_t, n_w, n_k)
+    amp_im  = amp_scan_grid["amp_im"]
+
+    n_pairs = len(gammas_pairs)
+    n_w     = len(w)
+    n_k     = len(k)
+    n_t     = len(scan_times)
+
+    # ------------------------------------------------------------------
+    # 1. For each pair: weighted sum of incremental complex amplitude
+    # ------------------------------------------------------------------
+    A_eff_re = np.zeros((n_pairs, n_w, n_k))
+    A_eff_im = np.zeros((n_pairs, n_w, n_k))
+
+    for p in range(n_pairs):
+        gamma_p = float(np.clip(gammas_pairs[p], gammas_grid.min(), gammas_grid.max()))
+        # Interpolate amplitude grid at this gamma (linear in log-gamma space)
+        ig  = int(np.searchsorted(gammas_grid, gamma_p, side="right")) - 1
+        ig  = int(np.clip(ig, 0, len(gammas_grid) - 2))
+        t   = (gamma_p - gammas_grid[ig]) / (gammas_grid[ig + 1] - gammas_grid[ig])
+        ar  = (1 - t) * amp_re[ig] + t * amp_re[ig + 1]   # (n_t, n_w, n_k)
+        ai  = (1 - t) * amp_im[ig] + t * amp_im[ig + 1]
+
+        # Weights resampled onto scan_times
+        wp = np.interp(scan_times, weights_times, weights[p])  # (n_t,)
+
+        # Incremental amplitude delta_amp[t] = amp[t] - amp[t-1]
+        dar = np.diff(ar, axis=0, prepend=0.)  # (n_t, n_w, n_k)
+        dai = np.diff(ai, axis=0, prepend=0.)
+
+        A_eff_re[p] = (wp[:, None, None] * dar).sum(axis=0)
+        A_eff_im[p] = (wp[:, None, None] * dai).sum(axis=0)
+
+    # ------------------------------------------------------------------
+    # 2. Sphere quadrature: Gauss–Legendre in cos(theta), uniform in phi
+    # ------------------------------------------------------------------
+    from numpy.polynomial.legendre import leggauss
+    cos_nodes, gl_weights = leggauss(n_theta)          # in [-1, 1]
+    phi_vals = np.linspace(0., 2. * np.pi, n_phi, endpoint=False)
+    d_phi    = 2. * np.pi / n_phi
+
+    # hat_k unit vectors: (n_theta * n_phi, 3)
+    CT, PH = np.meshgrid(cos_nodes, phi_vals, indexing="ij")   # (n_theta, n_phi)
+    ST     = np.sqrt(np.maximum(1. - CT**2, 0.))
+    hat_k  = np.stack([ST * np.cos(PH), ST * np.sin(PH), CT], axis=-1)
+    hat_k  = hat_k.reshape(-1, 3)                              # (N_sphere, 3)
+    d_omega = np.outer(gl_weights, np.full(n_phi, d_phi)).ravel()  # (N_sphere,)
+
+    # Collision axes and centres: (n_pairs, 3)
+    hat_n = np.asarray(pair_axes,   dtype=float)
+    x_p   = np.asarray(pair_centers, dtype=float)
+
+    # cos(theta_p) for all (pair, sphere_dir) combinations: (n_pairs, N_sphere)
+    cos_th = np.abs(hat_n @ hat_k.T)          # (n_pairs, N_sphere), clip to [0,1]
+    cos_th = np.clip(cos_th, 0., 1.)
+
+    # ------------------------------------------------------------------
+    # 3. Direction-integrate |sum_p A_p * exp(i phi_p)|^2
+    # ------------------------------------------------------------------
+    P_coh = np.zeros(n_w)
+
+    # Process one sphere direction at a time to keep memory bounded.
+    # Vectorising over pairs and frequencies; looping over directions.
+    for j in range(len(hat_k)):
+        A_tot_re = np.zeros(n_w)
+        A_tot_im = np.zeros(n_w)
+
+        for p in range(n_pairs):
+            ct = cos_th[p, j]
+            # Interpolate amplitude at this cos_theta for all frequencies
+            # A_eff_re[p, n_w, n_k] -> (n_w,) at cos_theta = ct
+            Ap_re = np.array([np.interp(ct, k, A_eff_re[p, iw]) for iw in range(n_w)])
+            Ap_im = np.array([np.interp(ct, k, A_eff_im[p, iw]) for iw in range(n_w)])
+
+            # Position phase: w * hat_k · x_p
+            phase     = w * float(hat_k[j] @ x_p[p])
+            cos_phase = np.cos(phase)
+            sin_phase = np.sin(phase)
+
+            A_tot_re += Ap_re * cos_phase - Ap_im * sin_phase
+            A_tot_im += Ap_re * sin_phase + Ap_im * cos_phase
+
+        P_coh += (A_tot_re**2 + A_tot_im**2) * w**3 * 2. * np.pi * d_omega[j]
+
+    if lambda_bar is not None:
+        _, norm = bubblemaster_normalization(lambda_bar)
+        P_coh *= norm
+
+    return w, P_coh
+
+
+def build_amplitude_scan_grid(
+    scan_results_amplitude: dict,
+    gammas_grid: np.ndarray,
+) -> dict:
+    """
+    Stack per-gamma amplitude scan results into 4-D grids ready for
+    coherent_reconstruct().
+
+    Parameters
+    ----------
+    scan_results_amplitude : dict mapping gamma -> load_amplitude_scan() output
+    gammas_grid            : (n_gamma,) sorted gamma values (keys of above dict)
+
+    Returns
+    -------
+    dict with 'w', 'k', 'amp_re'[n_gamma, n_t, n_w, n_k], 'amp_im'[...]
+    """
+    gammas_sorted = np.sort(gammas_grid)
+    first = scan_results_amplitude[float(gammas_sorted[0])]
+    n_t, n_w, n_k = first["amp_re"].shape
+
+    amp_re_grid = np.zeros((len(gammas_sorted), n_t, n_w, n_k))
+    amp_im_grid = np.zeros_like(amp_re_grid)
+
+    for ig, gamma in enumerate(gammas_sorted):
+        res = scan_results_amplitude[float(gamma)]
+        amp_re_grid[ig] = res["amp_re"]
+        amp_im_grid[ig] = res["amp_im"]
+
+    return {
+        "w":      first["w"],
+        "k":      first["k"],
+        "amp_re": amp_re_grid,
+        "amp_im": amp_im_grid,
+    }

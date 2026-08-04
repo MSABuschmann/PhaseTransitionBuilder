@@ -3,6 +3,7 @@
 #include <cmath>
 #include <vector>
 
+#include "amplitude.h"
 #include "setup.h"
 
 // Drop-in replacement for Integrator that uses Filon quadrature instead of
@@ -21,6 +22,7 @@ public:
                     const Setup &setup, int param = -1);
 
     std::vector<double> Compute(int i_t) const;
+    AmplitudeResult     ComputeAmplitude(int i_t) const;
 
     const std::vector<double> &GetW()     const { return wlist_; }
     const std::vector<double> &GetSlist() const { return slist_; }
@@ -32,7 +34,9 @@ private:
 
     void SetPhi2();
 
-    double k_integral(double w, double t_cut, double t_m, double t_max) const;
+    double k_integral(double w, double t_cut, double t_m, double t_max,
+                      std::vector<double> *out_amp_re = nullptr,
+                      std::vector<double> *out_amp_im = nullptr) const;
 
     void integral_u_filon(double s, double Sqrt1mkk, double w,
                           double sign, double umin,

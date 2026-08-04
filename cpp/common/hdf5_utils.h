@@ -103,3 +103,14 @@ inline void write_2d(Loc &loc, const std::string &name,
     auto ds = loc.createDataSet(name, H5::PredType::NATIVE_DOUBLE, space);
     ds.write(flat.data(), H5::PredType::NATIVE_DOUBLE);
 }
+
+// Flat-vector variant: caller owns the row-major layout.
+template <typename Loc>
+inline void write_2d_flat(Loc &loc, const std::string &name,
+                           const std::vector<double> &flat,
+                           hsize_t rows, hsize_t cols) {
+    hsize_t dims[2] = {rows, cols};
+    H5::DataSpace space(2, dims);
+    auto ds = loc.createDataSet(name, H5::PredType::NATIVE_DOUBLE, space);
+    ds.write(flat.data(), H5::PredType::NATIVE_DOUBLE);
+}

@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "amplitude.h"
 #include "setup.h"
 
 class Integrator {
@@ -17,6 +18,10 @@ public:
     // Returns spectrum[n_w].  Uses local copies so it is non-destructive.
     std::vector<double> Compute(int i_t) const;
 
+    // Like Compute, but also returns the pre-squaring complex amplitude
+    // A(w, cos_theta) for each (frequency, angle) bin.
+    AmplitudeResult ComputeAmplitude(int i_t) const;
+
     const std::vector<double> &GetW()     const { return wlist_; }
     const std::vector<double> &GetSlist() const { return slist_; }
     const std::vector<double> &GetZ()     const { return z_; }
@@ -28,7 +33,9 @@ private:
 
     void SetPhi2();
     double k_integral(double w, double eps_rel,
-                      double t_cut, double t_m, double t_max) const;
+                      double t_cut, double t_m, double t_max,
+                      std::vector<double> *out_amp_re = nullptr,
+                      std::vector<double> *out_amp_im = nullptr) const;
 
     void integral_u_quad(gsl_function &fr, gsl_function &fi,
                          gsl_integration_workspace *ws,
