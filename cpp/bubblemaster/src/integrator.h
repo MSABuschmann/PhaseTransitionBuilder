@@ -32,10 +32,12 @@ private:
     static std::vector<double> geomspace(double a, double b, std::size_t n);
 
     void SetPhi2();
-    double k_integral(double w, double eps_rel,
+    double k_integral(std::size_t i_w, double eps_rel,
                       double t_cut, double t_m, double t_max,
                       std::vector<double> *out_amp_re = nullptr,
                       std::vector<double> *out_amp_im = nullptr) const;
+
+    void PrecomputeZIntegrals();
 
     void integral_u_quad(gsl_function &fr, gsl_function &fi,
                          gsl_integration_workspace *ws,
@@ -102,6 +104,12 @@ private:
     std::vector<double> z_, wlist_, slist_, times_;
     std::vector<std::vector<double>> phi_;   // snapshots from evolution
     std::vector<std::vector<double>> phi2_;  // two-bubble reference field
+
+    // Precomputed z-integrals, indexed [i_w * n_k * n_s + i_k * n_s + i_s].
+    // Filled once in the constructor via PrecomputeZIntegrals().
+    std::vector<double> iz_zz1_, iz_zz2_;
+    std::vector<double> iz_xa1_, iz_xa2_;
+    std::vector<double> iz_xz1_, iz_xz2_;
 
     static constexpr double GSL_EPSABS = 0.;
     static constexpr int    GSL_KEY    = GSL_INTEG_GAUSS15;

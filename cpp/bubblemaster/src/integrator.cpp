@@ -35,6 +35,8 @@ Integrator::Integrator(const std::vector<std::vector<double>> &input_phi,
               << "  gsl_limit_=" << gsl_limit_ << "\n"
               << "  t_cut=" << t_cut_base_ << " t_m=" << t_m_base_
               << " t_max=" << t_max_base_ << "\n\n";
+
+    PrecomputeZIntegrals();
 }
 
 // ---------------------------------------------------------------------------
@@ -57,7 +59,7 @@ std::vector<double> Integrator::Compute(int i_t) const {
     std::vector<double> eps_rel = geomspace(1e-5, 1e-7, n_w_);
 
     for (std::size_t i_w = 0; i_w < n_w_; ++i_w) {
-        result[i_w] = k_integral(wlist_[i_w], eps_rel[i_w], t_cut, t_m, t_max);
+        result[i_w] = k_integral(i_w, eps_rel[i_w], t_cut, t_m, t_max);
     }
     return result;
 }
@@ -88,7 +90,7 @@ AmplitudeResult Integrator::ComputeAmplitude(int i_t) const {
 
     for (std::size_t i_w = 0; i_w < n_w_; ++i_w) {
         std::vector<double> row_re(n_k_, 0.), row_im(n_k_, 0.);
-        res.spectrum[i_w] = k_integral(wlist_[i_w], eps_rel[i_w],
+        res.spectrum[i_w] = k_integral(i_w, eps_rel[i_w],
                                        t_cut, t_m, t_max,
                                        &row_re, &row_im);
         std::copy(row_re.begin(), row_re.end(),
@@ -103,10 +105,11 @@ AmplitudeResult Integrator::ComputeAmplitude(int i_t) const {
 // k integral
 // ---------------------------------------------------------------------------
 
-double Integrator::k_integral(double w, double eps_rel,
+double Integrator::k_integral(std::size_t i_w, double eps_rel,
                                double t_cut, double t_m, double t_max,
                                std::vector<double> *out_amp_re,
                                std::vector<double> *out_amp_im) const {
+    const double w   = wlist_[i_w];
     double int_k = 0.;
     auto klist   = linspace(0., 1., static_cast<int>(n_k_));
     const double dk = klist[1] - klist[0];
@@ -119,6 +122,9 @@ double Integrator::k_integral(double w, double eps_rel,
         const double Onemkk     = 1. - k_sq;
         const double Sqrt1mkk   = std::sqrt(Onemkk);
         const double TwokSqrt   = 2. * k * Sqrt1mkk;
+
+        // Base index into precomputed z-integral cache for this (i_w, i_k)
+        const std::size_t z_base = (i_w * n_k_ + i_k) * n_s_;
 
         double int_s_zz_real    = 0., int_s_zz_imag    = 0.;
         double int_s_xandy_real = 0., int_s_xandy_imag = 0.;
@@ -152,11 +158,8 @@ double Integrator::k_integral(double w, double eps_rel,
                 integral_u_quad_region2(fr_zz, fi_zz, ws, s, Sqrt1mkk, w,
                                         eps_rel, ur2, ui2, t_cut, t_m, t_max);
 
-                double iz1 = 0., iz2 = 0.;
-                for (int i_z = 1; i_z < static_cast<int>(n_z_); ++i_z) {
-                    iz1 += integral_dz_zz(k, w, i_z, i_s, z_[i_z], phi_);
-                    iz2 += integral_dz_zz(k, w, i_z, i_s, z_[i_z], phi2_);
-                }
+                const double iz1 = iz_zz1_[z_base + i_s];
+                const double iz2 = iz_zz2_[z_base + i_s];
 
                 const double fac = (i_s == 0 || i_s == static_cast<int>(slist_.size())-1)
                                    ? 0.5 : 1.;
@@ -182,12 +185,8 @@ double Integrator::k_integral(double w, double eps_rel,
                 integral_u_quad_region2(fr_yy, fi_yy, ws, s_off, Sqrt1mkk, w,
                                         eps_rel, ury2, uiy2, t_cut, t_m, t_max);
 
-                double iz1 = 0., iz2 = 0.;
-                for (int i_z = 0; i_z < static_cast<int>(n_z_); ++i_z) {
-                    double fz = (i_z == 0 || i_z == static_cast<int>(n_z_)-1) ? 0.5 : 1.;
-                    iz1 += fz * integral_dz_xandy(k, w, i_z, i_s, z_[i_z], phi_);
-                    iz2 += fz * integral_dz_xandy(k, w, i_z, i_s, z_[i_z], phi2_);
-                }
+                const double iz1 = iz_xa1_[z_base + i_s];
+                const double iz2 = iz_xa2_[z_base + i_s];
 
                 const double pre = 0.5 * s_off * s_off * ds_;
                 int_s_xandy_real += pre * ((urx1*k_sq - ury1)*iz1 + (urx2*k_sq - ury2)*iz2);
@@ -206,12 +205,8 @@ double Integrator::k_integral(double w, double eps_rel,
                 integral_u_quad_region2(fr_xz, fi_xz, ws, s_off, Sqrt1mkk, w,
                                         eps_rel, ur2, ui2, t_cut, t_m, t_max);
 
-                double iz1 = 0., iz2 = 0.;
-                // start at i_z=1: xz_dphi_dz accesses phi[...][i_z-1]
-                for (int i_z = 1; i_z < static_cast<int>(n_z_); ++i_z) {
-                    iz1 += integral_dz_xz(k, w, i_z, i_s, z_[i_z], phi_);
-                    iz2 += integral_dz_xz(k, w, i_z, i_s, z_[i_z], phi2_);
-                }
+                const double iz1 = iz_xz1_[z_base + i_s];
+                const double iz2 = iz_xz2_[z_base + i_s];
 
                 const double pre = -s_off * s_off * ds_;
                 int_s_xz_real += pre * (ur1*iz1 + ur2*iz2);
@@ -276,6 +271,60 @@ void Integrator::integral_u_quad_region2(gsl_function &fr, gsl_function &fi,
                                           double t_cut, double t_m, double t_max) const {
     integral_u_quad(fr, fi, ws, s, Sqrt1mkk, w, eps_rel, 1., 0.,
                     real, imag, t_cut, t_m, t_max);
+}
+
+// ---------------------------------------------------------------------------
+// Precompute z-integrals (independent of t_cut / time step)
+// ---------------------------------------------------------------------------
+
+void Integrator::PrecomputeZIntegrals() {
+    const std::size_t total = n_w_ * n_k_ * n_s_;
+    iz_zz1_.assign(total, 0.);
+    iz_zz2_.assign(total, 0.);
+    iz_xa1_.assign(total, 0.);
+    iz_xa2_.assign(total, 0.);
+    iz_xz1_.assign(total, 0.);
+    iz_xz2_.assign(total, 0.);
+
+    auto klist = linspace(0., 1., static_cast<int>(n_k_));
+
+#pragma omp parallel for schedule(dynamic) collapse(2)
+    for (int i_w = 0; i_w < static_cast<int>(n_w_); ++i_w) {
+        for (int i_k = 0; i_k < static_cast<int>(n_k_); ++i_k) {
+            const double w = wlist_[i_w];
+            const double k = klist[i_k];
+            const std::size_t base = (i_w * n_k_ + i_k) * n_s_;
+
+            for (int i_s = 1; i_s < static_cast<int>(n_s_); ++i_s) {
+                double zz1 = 0., zz2 = 0.;
+                for (int i_z = 1; i_z < static_cast<int>(n_z_); ++i_z) {
+                    zz1 += integral_dz_zz(k, w, i_z, i_s, z_[i_z], phi_);
+                    zz2 += integral_dz_zz(k, w, i_z, i_s, z_[i_z], phi2_);
+                }
+                iz_zz1_[base + i_s] = zz1;
+                iz_zz2_[base + i_s] = zz2;
+
+                double xa1 = 0., xa2 = 0.;
+                for (int i_z = 0; i_z < static_cast<int>(n_z_); ++i_z) {
+                    const double fz = (i_z == 0 || i_z == static_cast<int>(n_z_)-1) ? 0.5 : 1.;
+                    xa1 += fz * integral_dz_xandy(k, w, i_z, i_s, z_[i_z], phi_);
+                    xa2 += fz * integral_dz_xandy(k, w, i_z, i_s, z_[i_z], phi2_);
+                }
+                iz_xa1_[base + i_s] = xa1;
+                iz_xa2_[base + i_s] = xa2;
+
+                double xz1 = 0., xz2 = 0.;
+                for (int i_z = 1; i_z < static_cast<int>(n_z_); ++i_z) {
+                    xz1 += integral_dz_xz(k, w, i_z, i_s, z_[i_z], phi_);
+                    xz2 += integral_dz_xz(k, w, i_z, i_s, z_[i_z], phi2_);
+                }
+                iz_xz1_[base + i_s] = xz1;
+                iz_xz2_[base + i_s] = xz2;
+            }
+        }
+    }
+
+    std::cout << "PrecomputeZIntegrals: done (" << total << " entries)\n\n";
 }
 
 // ---------------------------------------------------------------------------
