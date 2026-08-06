@@ -102,52 +102,94 @@ inline double C1(double t, double t_cut, double t_m, double t_0,
     }
 }
 
-// Integrand functions (params = {w, Sqrt1mkk, s, sign, t_cut, t_m, t_0, t_max, cutoff_type})
-double integrand_xx_real(double u, void *p) {
+// Core integrands (params = {w, Sqrt1mkk, s, sign, t_cut, t_m, t_0, t_max, cutoff_type}).
+// These omit the C1 cutoff window; the windowed wrappers below multiply it back in.
+// Kept as a single source of truth so the plain (unwindowed) and windowed variants
+// used by the incremental-in-time u-integral can never drift apart.
+inline double core_xx_real(double u, void *p) {
     double *d = static_cast<double *>(p);
     double ib = in_bessel(d[0], d[1], d[2], u, d[3]);
-    return (u*u+d[3]) * std::cos(d[0]*d[2]*u) * fast_bessel_j0m2(ib)
-         * C1(d[2]*u, d[4], d[5], d[6], d[7], (int)d[8]);
+    return (u*u+d[3]) * std::cos(d[0]*d[2]*u) * fast_bessel_j0m2(ib);
+}
+inline double core_xx_imag(double u, void *p) {
+    double *d = static_cast<double *>(p);
+    double ib = in_bessel(d[0], d[1], d[2], u, d[3]);
+    return (u*u+d[3]) * std::sin(d[0]*d[2]*u) * fast_bessel_j0m2(ib);
+}
+inline double core_yy_real(double u, void *p) {
+    double *d = static_cast<double *>(p);
+    double ib = in_bessel(d[0], d[1], d[2], u, d[3]);
+    return (u*u+d[3]) * std::cos(d[0]*d[2]*u) * fast_bessel_j0p2(ib);
+}
+inline double core_yy_imag(double u, void *p) {
+    double *d = static_cast<double *>(p);
+    double ib = in_bessel(d[0], d[1], d[2], u, d[3]);
+    return (u*u+d[3]) * std::sin(d[0]*d[2]*u) * fast_bessel_j0p2(ib);
+}
+inline double core_zz_real(double u, void *p) {
+    double *d = static_cast<double *>(p);
+    double ib = in_bessel(d[0], d[1], d[2], u, d[3]);
+    return std::cos(d[0]*d[2]*u) * fast_bessel_j0(ib);
+}
+inline double core_zz_imag(double u, void *p) {
+    double *d = static_cast<double *>(p);
+    double ib = in_bessel(d[0], d[1], d[2], u, d[3]);
+    return std::sin(d[0]*d[2]*u) * fast_bessel_j0(ib);
+}
+inline double core_xz_real(double u, void *p) {
+    double *d = static_cast<double *>(p);
+    double ib = in_bessel(d[0], d[1], d[2], u, d[3]);
+    return d[3] * std::cos(d[0]*d[2]*u) * fast_bessel_j1(ib) * std::sqrt(u*u+d[3]);
+}
+inline double core_xz_imag(double u, void *p) {
+    double *d = static_cast<double *>(p);
+    double ib = in_bessel(d[0], d[1], d[2], u, d[3]);
+    return d[3] * std::sin(d[0]*d[2]*u) * fast_bessel_j1(ib) * std::sqrt(u*u+d[3]);
+}
+
+// Windowed variants: core * C1(t_cut, t_m, t_0, t_max, cutoff_type). Used for the
+// bootstrap (i_t==0) call and for the transition-window piece of each later step.
+double integrand_xx_real(double u, void *p) {
+    double *d = static_cast<double *>(p);
+    return core_xx_real(u, p) * C1(d[2]*u, d[4], d[5], d[6], d[7], (int)d[8]);
 }
 double integrand_xx_imag(double u, void *p) {
     double *d = static_cast<double *>(p);
-    double ib = in_bessel(d[0], d[1], d[2], u, d[3]);
-    return (u*u+d[3]) * std::sin(d[0]*d[2]*u) * fast_bessel_j0m2(ib)
-         * C1(d[2]*u, d[4], d[5], d[6], d[7], (int)d[8]);
+    return core_xx_imag(u, p) * C1(d[2]*u, d[4], d[5], d[6], d[7], (int)d[8]);
 }
 double integrand_yy_real(double u, void *p) {
     double *d = static_cast<double *>(p);
-    double ib = in_bessel(d[0], d[1], d[2], u, d[3]);
-    return (u*u+d[3]) * std::cos(d[0]*d[2]*u) * fast_bessel_j0p2(ib)
-         * C1(d[2]*u, d[4], d[5], d[6], d[7], (int)d[8]);
+    return core_yy_real(u, p) * C1(d[2]*u, d[4], d[5], d[6], d[7], (int)d[8]);
 }
 double integrand_yy_imag(double u, void *p) {
     double *d = static_cast<double *>(p);
-    double ib = in_bessel(d[0], d[1], d[2], u, d[3]);
-    return (u*u+d[3]) * std::sin(d[0]*d[2]*u) * fast_bessel_j0p2(ib)
-         * C1(d[2]*u, d[4], d[5], d[6], d[7], (int)d[8]);
+    return core_yy_imag(u, p) * C1(d[2]*u, d[4], d[5], d[6], d[7], (int)d[8]);
 }
 double integrand_zz_real(double u, void *p) {
     double *d = static_cast<double *>(p);
-    double ib = in_bessel(d[0], d[1], d[2], u, d[3]);
-    return std::cos(d[0]*d[2]*u) * fast_bessel_j0(ib)
-         * C1(d[2]*u, d[4], d[5], d[6], d[7], (int)d[8]);
+    return core_zz_real(u, p) * C1(d[2]*u, d[4], d[5], d[6], d[7], (int)d[8]);
 }
 double integrand_zz_imag(double u, void *p) {
     double *d = static_cast<double *>(p);
-    double ib = in_bessel(d[0], d[1], d[2], u, d[3]);
-    return std::sin(d[0]*d[2]*u) * fast_bessel_j0(ib)
-         * C1(d[2]*u, d[4], d[5], d[6], d[7], (int)d[8]);
+    return core_zz_imag(u, p) * C1(d[2]*u, d[4], d[5], d[6], d[7], (int)d[8]);
 }
 double integrand_xz_real(double u, void *p) {
     double *d = static_cast<double *>(p);
-    double ib = in_bessel(d[0], d[1], d[2], u, d[3]);
-    return d[3] * std::cos(d[0]*d[2]*u) * fast_bessel_j1(ib)
-         * std::sqrt(u*u+d[3]) * C1(d[2]*u, d[4], d[5], d[6], d[7], (int)d[8]);
+    return core_xz_real(u, p) * C1(d[2]*u, d[4], d[5], d[6], d[7], (int)d[8]);
 }
 double integrand_xz_imag(double u, void *p) {
     double *d = static_cast<double *>(p);
-    double ib = in_bessel(d[0], d[1], d[2], u, d[3]);
-    return d[3] * std::sin(d[0]*d[2]*u) * fast_bessel_j1(ib)
-         * std::sqrt(u*u+d[3]) * C1(d[2]*u, d[4], d[5], d[6], d[7], (int)d[8]);
+    return core_xz_imag(u, p) * C1(d[2]*u, d[4], d[5], d[6], d[7], (int)d[8]);
 }
+
+// Plain (unwindowed) variants: used to integrate the C1==1 "plateau" region
+// incrementally between consecutive time steps, without paying for the C1
+// evaluation (which is identically 1 there anyway).
+double integrand_xx_real_plain(double u, void *p) { return core_xx_real(u, p); }
+double integrand_xx_imag_plain(double u, void *p) { return core_xx_imag(u, p); }
+double integrand_yy_real_plain(double u, void *p) { return core_yy_real(u, p); }
+double integrand_yy_imag_plain(double u, void *p) { return core_yy_imag(u, p); }
+double integrand_zz_real_plain(double u, void *p) { return core_zz_real(u, p); }
+double integrand_zz_imag_plain(double u, void *p) { return core_zz_imag(u, p); }
+double integrand_xz_real_plain(double u, void *p) { return core_xz_real(u, p); }
+double integrand_xz_imag_plain(double u, void *p) { return core_xz_imag(u, p); }

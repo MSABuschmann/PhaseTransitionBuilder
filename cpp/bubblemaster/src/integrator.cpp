@@ -37,18 +37,40 @@ Integrator::Integrator(const std::vector<std::vector<double>> &input_phi,
               << " t_max=" << t_max_base_ << "\n\n";
 
     PrecomputeZIntegrals();
+
+    const std::size_t total = n_w_ * n_k_ * n_s_;
+    cum_zz1_re_.assign(total, 0.); cum_zz1_im_.assign(total, 0.);
+    cum_zz2_re_.assign(total, 0.); cum_zz2_im_.assign(total, 0.);
+    cum_xx1_re_.assign(total, 0.); cum_xx1_im_.assign(total, 0.);
+    cum_xx2_re_.assign(total, 0.); cum_xx2_im_.assign(total, 0.);
+    cum_yy1_re_.assign(total, 0.); cum_yy1_im_.assign(total, 0.);
+    cum_yy2_re_.assign(total, 0.); cum_yy2_im_.assign(total, 0.);
+    cum_xz1_re_.assign(total, 0.); cum_xz1_im_.assign(total, 0.);
+    cum_xz2_re_.assign(total, 0.); cum_xz2_im_.assign(total, 0.);
 }
 
 // ---------------------------------------------------------------------------
-// Compute for one time index (non-destructive)
+// Compute for one time index
+//
+// The u-integral is accumulated incrementally across calls (see cum_* members
+// and integral_u_quad_incremental), so this mutates persisted state and must
+// be called with strictly increasing i_t starting at 0.
 // ---------------------------------------------------------------------------
 
-std::vector<double> Integrator::Compute(int i_t) const {
-    // Apply time shift (local copy - does not modify member state)
+std::vector<double> Integrator::Compute(int i_t) {
+    if (i_t != last_i_t_processed_ + 1) {
+        throw std::runtime_error(
+            "Integrator::Compute: i_t must be called in strictly increasing "
+            "order starting at 0 (u-integral is accumulated incrementally); "
+            "got i_t=" + std::to_string(i_t) +
+            " after last_i_t_processed_=" + std::to_string(last_i_t_processed_));
+    }
+
     double shift  = t_m_base_ - times_[i_t];
     double t_cut  = t_cut_base_ - shift;
     double t_m    = t_m_base_  - shift;
     double t_max  = t_max_base_ - shift;
+    const double t_cut_prev = t_cut_prev_;
 
     std::cout << "Compute i_t=" << i_t
               << " shift=" << shift
@@ -59,20 +81,33 @@ std::vector<double> Integrator::Compute(int i_t) const {
     std::vector<double> eps_rel = geomspace(1e-5, 1e-7, n_w_);
 
     for (std::size_t i_w = 0; i_w < n_w_; ++i_w) {
-        result[i_w] = k_integral(i_w, eps_rel[i_w], t_cut, t_m, t_max);
+        result[i_w] = k_integral(i_w, eps_rel[i_w], t_cut, t_m, t_max, t_cut_prev);
     }
+
+    t_cut_prev_ = t_cut;
+    last_i_t_processed_ = i_t;
     return result;
 }
 
 // ---------------------------------------------------------------------------
-// ComputeAmplitude: like Compute but retains pre-squaring A(w, cos_theta)
+// ComputeAmplitude: like Compute but retains pre-squaring A(w, cos_theta).
+// Same incremental-state / ordering requirement as Compute.
 // ---------------------------------------------------------------------------
 
-AmplitudeResult Integrator::ComputeAmplitude(int i_t) const {
+AmplitudeResult Integrator::ComputeAmplitude(int i_t) {
+    if (i_t != last_i_t_processed_ + 1) {
+        throw std::runtime_error(
+            "Integrator::ComputeAmplitude: i_t must be called in strictly "
+            "increasing order starting at 0 (u-integral is accumulated "
+            "incrementally); got i_t=" + std::to_string(i_t) +
+            " after last_i_t_processed_=" + std::to_string(last_i_t_processed_));
+    }
+
     double shift = t_m_base_ - times_[i_t];
     double t_cut = t_cut_base_ - shift;
     double t_m   = t_m_base_  - shift;
     double t_max = t_max_base_ - shift;
+    const double t_cut_prev = t_cut_prev_;
 
     std::cout << "ComputeAmplitude i_t=" << i_t
               << " shift=" << shift
@@ -91,13 +126,16 @@ AmplitudeResult Integrator::ComputeAmplitude(int i_t) const {
     for (std::size_t i_w = 0; i_w < n_w_; ++i_w) {
         std::vector<double> row_re(n_k_, 0.), row_im(n_k_, 0.);
         res.spectrum[i_w] = k_integral(i_w, eps_rel[i_w],
-                                       t_cut, t_m, t_max,
+                                       t_cut, t_m, t_max, t_cut_prev,
                                        &row_re, &row_im);
         std::copy(row_re.begin(), row_re.end(),
                   res.amp_re.begin() + i_w * n_k_);
         std::copy(row_im.begin(), row_im.end(),
                   res.amp_im.begin() + i_w * n_k_);
     }
+
+    t_cut_prev_ = t_cut;
+    last_i_t_processed_ = i_t;
     return res;
 }
 
@@ -107,8 +145,9 @@ AmplitudeResult Integrator::ComputeAmplitude(int i_t) const {
 
 double Integrator::k_integral(std::size_t i_w, double eps_rel,
                                double t_cut, double t_m, double t_max,
+                               double t_cut_prev,
                                std::vector<double> *out_amp_re,
-                               std::vector<double> *out_amp_im) const {
+                               std::vector<double> *out_amp_im) {
     const double w   = wlist_[i_w];
     double int_k = 0.;
     auto klist   = linspace(0., 1., static_cast<int>(n_k_));
@@ -123,12 +162,24 @@ double Integrator::k_integral(std::size_t i_w, double eps_rel,
         const double Sqrt1mkk   = std::sqrt(Onemkk);
         const double TwokSqrt   = 2. * k * Sqrt1mkk;
 
-        // Base index into precomputed z-integral cache for this (i_w, i_k)
+        // Base index into precomputed z-integral / cumulative-u-integral
+        // caches for this (i_w, i_k)
         const std::size_t z_base = (i_w * n_k_ + i_k) * n_s_;
 
         double int_s_zz_real    = 0., int_s_zz_imag    = 0.;
         double int_s_xandy_real = 0., int_s_xandy_imag = 0.;
         double int_s_xz_real    = 0., int_s_xz_imag    = 0.;
+
+        // Pointers so the (thread-parallel) loops below can read/write this
+        // (i_w, i_k) slice of the persisted cumulative state directly.
+        double *cum_zz1_re = cum_zz1_re_.data() + z_base, *cum_zz1_im = cum_zz1_im_.data() + z_base;
+        double *cum_zz2_re = cum_zz2_re_.data() + z_base, *cum_zz2_im = cum_zz2_im_.data() + z_base;
+        double *cum_xx1_re = cum_xx1_re_.data() + z_base, *cum_xx1_im = cum_xx1_im_.data() + z_base;
+        double *cum_xx2_re = cum_xx2_re_.data() + z_base, *cum_xx2_im = cum_xx2_im_.data() + z_base;
+        double *cum_yy1_re = cum_yy1_re_.data() + z_base, *cum_yy1_im = cum_yy1_im_.data() + z_base;
+        double *cum_yy2_re = cum_yy2_re_.data() + z_base, *cum_yy2_im = cum_yy2_im_.data() + z_base;
+        double *cum_xz1_re = cum_xz1_re_.data() + z_base, *cum_xz1_im = cum_xz1_im_.data() + z_base;
+        double *cum_xz2_re = cum_xz2_re_.data() + z_base, *cum_xz2_im = cum_xz2_im_.data() + z_base;
 
 #pragma omp parallel
         {
@@ -147,16 +198,31 @@ double Integrator::k_integral(std::size_t i_w, double eps_rel,
             fr_xz.function = &integrand_xz_real;
             fi_xz.function = &integrand_xz_imag;
 
+            gsl_function fr_xx_p, fi_xx_p, fr_yy_p, fi_yy_p,
+                         fr_zz_p, fi_zz_p, fr_xz_p, fi_xz_p;
+            fr_xx_p.function = &integrand_xx_real_plain;
+            fi_xx_p.function = &integrand_xx_imag_plain;
+            fr_yy_p.function = &integrand_yy_real_plain;
+            fi_yy_p.function = &integrand_yy_imag_plain;
+            fr_zz_p.function = &integrand_zz_real_plain;
+            fi_zz_p.function = &integrand_zz_imag_plain;
+            fr_xz_p.function = &integrand_xz_real_plain;
+            fi_xz_p.function = &integrand_xz_imag_plain;
+
 #pragma omp for reduction(+:int_s_zz_real,int_s_zz_imag) schedule(dynamic)
             for (int i_s = 0; i_s < static_cast<int>(slist_.size()); ++i_s) {
                 const double s = slist_[i_s];
                 if (s == 0.) continue;
 
                 double ur1, ui1, ur2, ui2;
-                integral_u_quad_region1(fr_zz, fi_zz, ws, s, Sqrt1mkk, w,
-                                        eps_rel, ur1, ui1, t_cut, t_m, t_max);
-                integral_u_quad_region2(fr_zz, fi_zz, ws, s, Sqrt1mkk, w,
-                                        eps_rel, ur2, ui2, t_cut, t_m, t_max);
+                integral_u_quad_incremental_region1(fr_zz, fi_zz, fr_zz_p, fi_zz_p, ws,
+                                        s, Sqrt1mkk, w, eps_rel, ur1, ui1,
+                                        t_cut, t_m, t_max, t_cut_prev,
+                                        cum_zz1_re[i_s], cum_zz1_im[i_s]);
+                integral_u_quad_incremental_region2(fr_zz, fi_zz, fr_zz_p, fi_zz_p, ws,
+                                        s, Sqrt1mkk, w, eps_rel, ur2, ui2,
+                                        t_cut, t_m, t_max, t_cut_prev,
+                                        cum_zz2_re[i_s], cum_zz2_im[i_s]);
 
                 const double iz1 = iz_zz1_[z_base + i_s];
                 const double iz2 = iz_zz2_[z_base + i_s];
@@ -175,15 +241,23 @@ double Integrator::k_integral(std::size_t i_w, double eps_rel,
                 if (s == 0.) continue;
 
                 double urx1, uix1, urx2, uix2;
-                integral_u_quad_region1(fr_xx, fi_xx, ws, s_off, Sqrt1mkk, w,
-                                        eps_rel, urx1, uix1, t_cut, t_m, t_max);
-                integral_u_quad_region2(fr_xx, fi_xx, ws, s_off, Sqrt1mkk, w,
-                                        eps_rel, urx2, uix2, t_cut, t_m, t_max);
+                integral_u_quad_incremental_region1(fr_xx, fi_xx, fr_xx_p, fi_xx_p, ws,
+                                        s_off, Sqrt1mkk, w, eps_rel, urx1, uix1,
+                                        t_cut, t_m, t_max, t_cut_prev,
+                                        cum_xx1_re[i_s], cum_xx1_im[i_s]);
+                integral_u_quad_incremental_region2(fr_xx, fi_xx, fr_xx_p, fi_xx_p, ws,
+                                        s_off, Sqrt1mkk, w, eps_rel, urx2, uix2,
+                                        t_cut, t_m, t_max, t_cut_prev,
+                                        cum_xx2_re[i_s], cum_xx2_im[i_s]);
                 double ury1, uiy1, ury2, uiy2;
-                integral_u_quad_region1(fr_yy, fi_yy, ws, s_off, Sqrt1mkk, w,
-                                        eps_rel, ury1, uiy1, t_cut, t_m, t_max);
-                integral_u_quad_region2(fr_yy, fi_yy, ws, s_off, Sqrt1mkk, w,
-                                        eps_rel, ury2, uiy2, t_cut, t_m, t_max);
+                integral_u_quad_incremental_region1(fr_yy, fi_yy, fr_yy_p, fi_yy_p, ws,
+                                        s_off, Sqrt1mkk, w, eps_rel, ury1, uiy1,
+                                        t_cut, t_m, t_max, t_cut_prev,
+                                        cum_yy1_re[i_s], cum_yy1_im[i_s]);
+                integral_u_quad_incremental_region2(fr_yy, fi_yy, fr_yy_p, fi_yy_p, ws,
+                                        s_off, Sqrt1mkk, w, eps_rel, ury2, uiy2,
+                                        t_cut, t_m, t_max, t_cut_prev,
+                                        cum_yy2_re[i_s], cum_yy2_im[i_s]);
 
                 const double iz1 = iz_xa1_[z_base + i_s];
                 const double iz2 = iz_xa2_[z_base + i_s];
@@ -200,10 +274,14 @@ double Integrator::k_integral(std::size_t i_w, double eps_rel,
                 if (s == 0.) continue;
 
                 double ur1, ui1, ur2, ui2;
-                integral_u_quad_region1(fr_xz, fi_xz, ws, s_off, Sqrt1mkk, w,
-                                        eps_rel, ur1, ui1, t_cut, t_m, t_max);
-                integral_u_quad_region2(fr_xz, fi_xz, ws, s_off, Sqrt1mkk, w,
-                                        eps_rel, ur2, ui2, t_cut, t_m, t_max);
+                integral_u_quad_incremental_region1(fr_xz, fi_xz, fr_xz_p, fi_xz_p, ws,
+                                        s_off, Sqrt1mkk, w, eps_rel, ur1, ui1,
+                                        t_cut, t_m, t_max, t_cut_prev,
+                                        cum_xz1_re[i_s], cum_xz1_im[i_s]);
+                integral_u_quad_incremental_region2(fr_xz, fi_xz, fr_xz_p, fi_xz_p, ws,
+                                        s_off, Sqrt1mkk, w, eps_rel, ur2, ui2,
+                                        t_cut, t_m, t_max, t_cut_prev,
+                                        cum_xz2_re[i_s], cum_xz2_im[i_s]);
 
                 const double iz1 = iz_xz1_[z_base + i_s];
                 const double iz2 = iz_xz2_[z_base + i_s];
@@ -235,42 +313,94 @@ double Integrator::u_max(double s, double t_max_local) const {
     return 1. + t_max_local / s;
 }
 
-void Integrator::integral_u_quad(gsl_function &fr, gsl_function &fi,
-                                  gsl_integration_workspace *ws,
-                                  double s, double Sqrt1mkk, double w,
-                                  double eps_rel, double sign, double umin,
-                                  double &real, double &imag,
-                                  double t_cut, double t_m, double t_max) const {
+// Incremental replacement for the old integral_u_quad: instead of
+// re-integrating the whole [umin_region, u_max] range from scratch every time
+// step, split it at the plateau boundary u_cut = t_cut/s (clamped to
+// umin_region):
+//   - [umin_region, u_cut]: the C1==1 "plateau". f(u) here doesn't depend on
+//     i_t at all, so instead of recomputing the whole thing we only integrate
+//     the NEW slice since the previous step's u_cut (t_cut_prev/s) and add it
+//     to the persisted running total (cum_re/cum_im, read-modify-write).
+//   - [u_cut, u_max]: the transition window plus tail, fixed width (~7*t_0/s),
+//     just slides in u as t_cut advances. Computed fresh each step with the
+//     C1-weighted integrand — cheap since it never grows.
+// Mathematically this reproduces exactly what the old single full-range
+// C1-weighted integral computed (C1 is exactly 1 below t_cut by construction),
+// just without redoing the plateau portion 32 times.
+void Integrator::integral_u_quad_incremental(
+        gsl_function &fr, gsl_function &fi,
+        gsl_function &fr_plain, gsl_function &fi_plain,
+        gsl_integration_workspace *ws,
+        double s, double Sqrt1mkk, double w, double eps_rel,
+        double sign, double umin_region,
+        double &real, double &imag,
+        double t_cut, double t_m, double t_max,
+        double t_cut_prev,
+        double &cum_re, double &cum_im) const {
     double args[9] = {w, Sqrt1mkk, s, sign,
                       t_cut, t_m, t_0_, t_max,
                       static_cast<double>(cutoff_type_)};
     fr.params = &args;
     fi.params = &args;
+    fr_plain.params = &args;
+    fi_plain.params = &args;
+
+    const double plateau_now  = std::max(umin_region, t_cut / s);
+    const double plateau_prev = std::max(umin_region, t_cut_prev / s);
+
     double err;
-    gsl_integration_qag(&fr, umin, u_max(s, t_max), GSL_EPSABS, eps_rel,
-                        gsl_limit_, GSL_KEY, ws, &real, &err);
-    gsl_integration_qag(&fi, umin, u_max(s, t_max), GSL_EPSABS, eps_rel,
-                        gsl_limit_, GSL_KEY, ws, &imag, &err);
+    if (plateau_now > plateau_prev) {
+        double d_re, d_im;
+        gsl_integration_qag(&fr_plain, plateau_prev, plateau_now, GSL_EPSABS, eps_rel,
+                            gsl_limit_, GSL_KEY, ws, &d_re, &err);
+        gsl_integration_qag(&fi_plain, plateau_prev, plateau_now, GSL_EPSABS, eps_rel,
+                            gsl_limit_, GSL_KEY, ws, &d_im, &err);
+        cum_re += d_re;
+        cum_im += d_im;
+    }
+    // else: plateau boundary hasn't advanced past umin_region yet for this
+    // (s, i_t) — nothing new to add; cum_re/cum_im stay at their prior value
+    // (0 if the plateau hasn't started at all).
+
+    double w_re = 0., w_im = 0.;
+    const double hi = u_max(s, t_max);
+    if (hi > plateau_now) {
+        gsl_integration_qag(&fr, plateau_now, hi, GSL_EPSABS, eps_rel,
+                            gsl_limit_, GSL_KEY, ws, &w_re, &err);
+        gsl_integration_qag(&fi, plateau_now, hi, GSL_EPSABS, eps_rel,
+                            gsl_limit_, GSL_KEY, ws, &w_im, &err);
+    }
+
+    real = cum_re + w_re;
+    imag = cum_im + w_im;
 }
 
-void Integrator::integral_u_quad_region1(gsl_function &fr, gsl_function &fi,
-                                          gsl_integration_workspace *ws,
-                                          double s, double Sqrt1mkk, double w,
-                                          double eps_rel,
-                                          double &real, double &imag,
-                                          double t_cut, double t_m, double t_max) const {
-    integral_u_quad(fr, fi, ws, s, Sqrt1mkk, w, eps_rel, -1., 1.,
-                    real, imag, t_cut, t_m, t_max);
+void Integrator::integral_u_quad_incremental_region1(
+        gsl_function &fr, gsl_function &fi,
+        gsl_function &fr_plain, gsl_function &fi_plain,
+        gsl_integration_workspace *ws,
+        double s, double Sqrt1mkk, double w, double eps_rel,
+        double &real, double &imag,
+        double t_cut, double t_m, double t_max, double t_cut_prev,
+        double &cum_re, double &cum_im) const {
+    integral_u_quad_incremental(fr, fi, fr_plain, fi_plain, ws,
+                                s, Sqrt1mkk, w, eps_rel, -1., 1.,
+                                real, imag, t_cut, t_m, t_max, t_cut_prev,
+                                cum_re, cum_im);
 }
 
-void Integrator::integral_u_quad_region2(gsl_function &fr, gsl_function &fi,
-                                          gsl_integration_workspace *ws,
-                                          double s, double Sqrt1mkk, double w,
-                                          double eps_rel,
-                                          double &real, double &imag,
-                                          double t_cut, double t_m, double t_max) const {
-    integral_u_quad(fr, fi, ws, s, Sqrt1mkk, w, eps_rel, 1., 0.,
-                    real, imag, t_cut, t_m, t_max);
+void Integrator::integral_u_quad_incremental_region2(
+        gsl_function &fr, gsl_function &fi,
+        gsl_function &fr_plain, gsl_function &fi_plain,
+        gsl_integration_workspace *ws,
+        double s, double Sqrt1mkk, double w, double eps_rel,
+        double &real, double &imag,
+        double t_cut, double t_m, double t_max, double t_cut_prev,
+        double &cum_re, double &cum_im) const {
+    integral_u_quad_incremental(fr, fi, fr_plain, fi_plain, ws,
+                                s, Sqrt1mkk, w, eps_rel, 1., 0.,
+                                real, imag, t_cut, t_m, t_max, t_cut_prev,
+                                cum_re, cum_im);
 }
 
 // ---------------------------------------------------------------------------
