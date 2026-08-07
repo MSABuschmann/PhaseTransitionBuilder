@@ -24,6 +24,13 @@ static double elapsed(Clock::time_point t0) {
 }
 
 int main(int argc, char *argv[]) {
+    // Auto-flush std::cout after every '<<' — without this, output redirected
+    // to a SLURM log file (not a TTY) is fully buffered, so progress prints
+    // (per-time-step timing, etc.) don't actually reach the log until the
+    // buffer fills or the process exits, making `tail -f` on the log useless
+    // for monitoring an in-progress run.
+    std::cout.setf(std::ios::unitbuf);
+
     auto t_start = Clock::now();
     if (argc < 3) {
         std::cerr << "Usage: bubblemaster <setup.h5> <output_dir/>"
