@@ -25,7 +25,11 @@ public:
                   const Setup &setup, int param = -1);
     ~GpuIntegrator();
 
-    std::vector<double> Compute(int i_t) const;
+    // IMPORTANT: the plateau (C1==1) portion of the u-integral is accumulated
+    // incrementally across time steps in device memory (see d_cumbuf_ below),
+    // so i_t must be called in strictly increasing order starting at 0 —
+    // matches how main.cpp already drives it. Calling out of order throws.
+    std::vector<double> Compute(int i_t);
 
     const std::vector<double> &GetW()     const { return wlist_; }
     const std::vector<double> &GetSlist() const { return slist_; }
@@ -45,8 +49,8 @@ private:
 
     std::vector<double> wlist_, slist_, z_, times_, klist_;
 
-    int         param_floor_ = -1;  // from constructor param; -1 → adaptive
-    mutable int n_floor_ = 0;       // resolved each Compute()
+    int param_floor_ = -1;  // from constructor param; -1 → adaptive
+    int n_floor_     = 0;   // resolved each Compute()
 
     // Device arrays (allocated in constructor, freed in destructor)
     double *d_phi_    = nullptr;   // [n_s * n_z]
@@ -56,4 +60,21 @@ private:
     double *d_k_      = nullptr;   // [n_k]
     double *d_s_      = nullptr;   // [n_s]
     double *d_intbuf_ = nullptr;   // [n_w * n_k * n_s * 6]  — reused each Compute()
+
+    // Persisted cumulative plateau state for the u-integral, one 16-double
+    // slot per (i_w,i_k,i_s) thread [zz1,xx1,yy1,xz1,zz2,xx2,yy2,xz2] x
+    // (re,im); layout is [idx*16 + slot], idx = i_w*n_k*n_s + i_k*n_s + i_s,
+    // matching gw_kernel's existing indexing. Allocated (zero-initialised) in
+    // the constructor, persists across Compute() calls (unlike d_intbuf_,
+    // which is a scratch buffer reset every call), freed in destructor.
+    double *d_cumbuf_ = nullptr;
+
+    // t_cut from the previous Compute() call. A large-but-finite negative
+    // sentinel before the first call (not actual infinity, for consistency
+    // with the CPU integrators — see their t_cut_prev_ comments); t_cut_prev_/s
+    // stays hugely negative but finite for any physically sane s, so it
+    // clamps to umin on the first step.
+    static constexpr double kNegInfSentinel = -1e30;
+    double t_cut_prev_ = kNegInfSentinel;
+    int    last_i_t_processed_ = -1;
 };

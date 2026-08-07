@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstdio>
 #include <iostream>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <cuda_runtime.h>
@@ -215,62 +217,117 @@ __device__ void filon_segment(
 }
 
 // ---------------------------------------------------------------------------
-// Streaming Filon u-integral — split at t_cut/s to eliminate the C² kink,
-// dead zone removed (upper limit t_max/s, not 1+t_max/s), N from delta-ib.
+// Incremental streaming Filon u-integral — split at t_cut/s to eliminate the
+// C² kink, dead zone removed (upper limit t_max/s, not 1+t_max/s), N from
+// delta-ib, same as the original filon_u. The difference: the plateau piece
+// [umin, u_split] doesn't depend on i_t (C1==1 there identically), so instead
+// of re-running Filon over the whole growing plateau every kernel launch
+// (time step), only the NEW slice since the previous launch's u_split
+// (t_cut_prev/s) is integrated and added into the persisted cum_re/cum_im
+// (references directly into this thread's slot of the device-resident
+// d_cumbuf_ — see GpuIntegrator::d_cumbuf_). The transition window
+// [u_split, u_top] has fixed width and just slides in u as t_cut advances,
+// so it's still recomputed fresh every launch.
 //
-//   NEED_ZZ  = true for calls at time s (zz component feeds the zz z-integral)
-//   NEED_XYZ = true for calls at time s_off (xx, yy, xz feed the other z-integrals)
+// Split into a zz-only and an xyz-only variant (rather than one templated
+// function) since each needs a different number/shape of cum_re/cum_im
+// arguments — mirrors the two distinct call shapes already used in
+// gw_kernel (one at s for zz, one at s_off for xx/yy/xz).
 // ---------------------------------------------------------------------------
 
-template <bool NEED_ZZ, bool NEED_XYZ>
-__device__ void filon_u(double s, double Sqrt1mkk, double w,
-                         double sign, double umin,
-                         double t_cut, double t_m, double t_0, double t_max,
-                         int cutoff_type, int n_floor,
-                         double &zz_r, double &zz_i,
-                         double &xx_r, double &xx_i,
-                         double &yy_r, double &yy_i,
-                         double &xz_r, double &xz_i)
+__device__ void filon_zz_incremental(
+    double s, double Sqrt1mkk, double w,
+    double sign, double umin,
+    double t_cut, double t_m, double t_0, double t_max,
+    int cutoff_type, int n_floor, double t_cut_prev,
+    double &cum_re, double &cum_im,
+    double &zz_r, double &zz_i)
 {
     const double u_top   = t_max / s;
     const double u_split = t_cut / s;
 
     if (u_top <= umin) {
-        zz_r = zz_i = xx_r = xx_i = yy_r = yy_i = xz_r = xz_i = 0.;
+        zz_r = cum_re; zz_i = cum_im;
         return;
     }
 
-    if (u_split > umin && u_split < u_top) {
-        int N_lo = filon_N(umin,    u_split, sign, w, Sqrt1mkk, s, n_floor);
-        int N_hi = filon_N(u_split, u_top,   sign, w, Sqrt1mkk, s, n_floor);
+    const double plateau_now  = fmax(umin, u_split);
+    const double plateau_prev = fmax(umin, t_cut_prev / s);
 
-        double lo_zz_r = 0., lo_zz_i = 0., lo_xx_r = 0., lo_xx_i = 0.;
-        double lo_yy_r = 0., lo_yy_i = 0., lo_xz_r = 0., lo_xz_i = 0.;
-        double hi_zz_r = 0., hi_zz_i = 0., hi_xx_r = 0., hi_xx_i = 0.;
-        double hi_yy_r = 0., hi_yy_i = 0., hi_xz_r = 0., hi_xz_i = 0.;
-
-        filon_segment<NEED_ZZ, NEED_XYZ>(s, Sqrt1mkk, w, sign,
-            umin, u_split, N_lo,
+    if (plateau_now > plateau_prev) {
+        int N = filon_N(plateau_prev, plateau_now, sign, w, Sqrt1mkk, s, n_floor);
+        double d_r, d_i, dum_r, dum_i, dum2_r, dum2_i, dum3_r, dum3_i;
+        filon_segment<true, false>(s, Sqrt1mkk, w, sign,
+            plateau_prev, plateau_now, N,
             t_cut, t_m, t_0, t_max, cutoff_type,
-            lo_zz_r, lo_zz_i, lo_xx_r, lo_xx_i,
-            lo_yy_r, lo_yy_i, lo_xz_r, lo_xz_i);
-        filon_segment<NEED_ZZ, NEED_XYZ>(s, Sqrt1mkk, w, sign,
-            u_split, u_top, N_hi,
-            t_cut, t_m, t_0, t_max, cutoff_type,
-            hi_zz_r, hi_zz_i, hi_xx_r, hi_xx_i,
-            hi_yy_r, hi_yy_i, hi_xz_r, hi_xz_i);
-
-        zz_r = lo_zz_r + hi_zz_r;  zz_i = lo_zz_i + hi_zz_i;
-        xx_r = lo_xx_r + hi_xx_r;  xx_i = lo_xx_i + hi_xx_i;
-        yy_r = lo_yy_r + hi_yy_r;  yy_i = lo_yy_i + hi_yy_i;
-        xz_r = lo_xz_r + hi_xz_r;  xz_i = lo_xz_i + hi_xz_i;
-    } else {
-        int N = filon_N(umin, u_top, sign, w, Sqrt1mkk, s, n_floor);
-        filon_segment<NEED_ZZ, NEED_XYZ>(s, Sqrt1mkk, w, sign,
-            umin, u_top, N,
-            t_cut, t_m, t_0, t_max, cutoff_type,
-            zz_r, zz_i, xx_r, xx_i, yy_r, yy_i, xz_r, xz_i);
+            d_r, d_i, dum_r, dum_i, dum2_r, dum2_i, dum3_r, dum3_i);
+        cum_re += d_r; cum_im += d_i;
     }
+
+    double win_r = 0., win_i = 0.;
+    if (u_top > plateau_now) {
+        int N = filon_N(plateau_now, u_top, sign, w, Sqrt1mkk, s, n_floor);
+        double dum_r, dum_i, dum2_r, dum2_i, dum3_r, dum3_i;
+        filon_segment<true, false>(s, Sqrt1mkk, w, sign,
+            plateau_now, u_top, N,
+            t_cut, t_m, t_0, t_max, cutoff_type,
+            win_r, win_i, dum_r, dum_i, dum2_r, dum2_i, dum3_r, dum3_i);
+    }
+
+    zz_r = cum_re + win_r;
+    zz_i = cum_im + win_i;
+}
+
+__device__ void filon_xyz_incremental(
+    double s, double Sqrt1mkk, double w,
+    double sign, double umin,
+    double t_cut, double t_m, double t_0, double t_max,
+    int cutoff_type, int n_floor, double t_cut_prev,
+    double &cum_xx_re, double &cum_xx_im,
+    double &cum_yy_re, double &cum_yy_im,
+    double &cum_xz_re, double &cum_xz_im,
+    double &xx_r, double &xx_i,
+    double &yy_r, double &yy_i,
+    double &xz_r, double &xz_i)
+{
+    const double u_top   = t_max / s;
+    const double u_split = t_cut / s;
+
+    if (u_top <= umin) {
+        xx_r = cum_xx_re; xx_i = cum_xx_im;
+        yy_r = cum_yy_re; yy_i = cum_yy_im;
+        xz_r = cum_xz_re; xz_i = cum_xz_im;
+        return;
+    }
+
+    const double plateau_now  = fmax(umin, u_split);
+    const double plateau_prev = fmax(umin, t_cut_prev / s);
+
+    if (plateau_now > plateau_prev) {
+        int N = filon_N(plateau_prev, plateau_now, sign, w, Sqrt1mkk, s, n_floor);
+        double dum_r, dum_i, d_xx_r, d_xx_i, d_yy_r, d_yy_i, d_xz_r, d_xz_i;
+        filon_segment<false, true>(s, Sqrt1mkk, w, sign,
+            plateau_prev, plateau_now, N,
+            t_cut, t_m, t_0, t_max, cutoff_type,
+            dum_r, dum_i, d_xx_r, d_xx_i, d_yy_r, d_yy_i, d_xz_r, d_xz_i);
+        cum_xx_re += d_xx_r; cum_xx_im += d_xx_i;
+        cum_yy_re += d_yy_r; cum_yy_im += d_yy_i;
+        cum_xz_re += d_xz_r; cum_xz_im += d_xz_i;
+    }
+
+    double w_xx_r = 0., w_xx_i = 0., w_yy_r = 0., w_yy_i = 0., w_xz_r = 0., w_xz_i = 0.;
+    if (u_top > plateau_now) {
+        int N = filon_N(plateau_now, u_top, sign, w, Sqrt1mkk, s, n_floor);
+        double dum_r, dum_i;
+        filon_segment<false, true>(s, Sqrt1mkk, w, sign,
+            plateau_now, u_top, N,
+            t_cut, t_m, t_0, t_max, cutoff_type,
+            dum_r, dum_i, w_xx_r, w_xx_i, w_yy_r, w_yy_i, w_xz_r, w_xz_i);
+    }
+
+    xx_r = cum_xx_re + w_xx_r; xx_i = cum_xx_im + w_xx_i;
+    yy_r = cum_yy_re + w_yy_r; yy_i = cum_yy_im + w_yy_i;
+    xz_r = cum_xz_re + w_xz_r; xz_i = cum_xz_im + w_xz_i;
 }
 
 // ---------------------------------------------------------------------------
@@ -278,6 +335,12 @@ __device__ void filon_u(double s, double Sqrt1mkk, double w,
 //
 // Writes 6 linear per-s contributions to intbuf[i_w * n_k*n_s*6 + ...].
 // CPU finalization reduces over i_s and computes the nonlinear |re+i*im|^2.
+//
+// The plateau portion of the u-integral is carried across kernel launches
+// (time steps) in cumbuf — a persistent device buffer allocated once in
+// GpuIntegrator's constructor, NOT reset between calls (unlike intbuf, which
+// is scratch, memset every launch). Each thread owns a fixed 16-double slot
+// at cumbuf[idx*16 .. idx*16+15]; see GpuIntegrator::d_cumbuf_ for the layout.
 // ---------------------------------------------------------------------------
 
 __global__ void gw_kernel(
@@ -290,8 +353,9 @@ __global__ void gw_kernel(
     const double * __restrict__ k_arr,   // [n_k]
     const double * __restrict__ s_arr,   // [n_s]
     double t_cut, double t_m, double t_0, double t_max,
-    int cutoff_type, int n_floor,
-    double * __restrict__ intbuf         // [n_w * n_k * n_s * 6]
+    int cutoff_type, int n_floor, double t_cut_prev,
+    double * __restrict__ intbuf,        // [n_w * n_k * n_s * 6]
+    double * __restrict__ cumbuf         // [n_w * n_k * n_s * 16] — persists across launches
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n_w * n_k * n_s) return;
@@ -312,24 +376,33 @@ __global__ void gw_kernel(
     double Sqrt1mkk = sqrt(Onemkk);
     double s_off    = s - 0.5 * ds;
 
-    // --- u-integrals ---
+    // This thread's persistent cum slot — references bind straight to global
+    // memory, so += on these writes through immediately (no manual copy-back).
+    double *c = cumbuf + idx * 16;
+    double &cum_zz1_re = c[0],  &cum_zz1_im = c[1],  &cum_zz2_re = c[2],  &cum_zz2_im = c[3];
+    double &cum_xx1_re = c[4],  &cum_xx1_im = c[5],  &cum_xx2_re = c[6],  &cum_xx2_im = c[7];
+    double &cum_yy1_re = c[8],  &cum_yy1_im = c[9],  &cum_yy2_re = c[10], &cum_yy2_im = c[11];
+    double &cum_xz1_re = c[12], &cum_xz1_im = c[13], &cum_xz2_re = c[14], &cum_xz2_im = c[15];
+
+    // --- u-integrals (incremental — see filon_zz_incremental/filon_xyz_incremental) ---
     double zz_r1, zz_i1, zz_r2, zz_i2;
-    double _u, _v;   // placeholders for unused outputs
-    filon_u<true,false>(s, Sqrt1mkk, w, -1., 1.,
-                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor,
-                        zz_r1, zz_i1, _u, _v, _u, _v, _u, _v);
-    filon_u<true,false>(s, Sqrt1mkk, w, +1., 0.,
-                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor,
-                        zz_r2, zz_i2, _u, _v, _u, _v, _u, _v);
+    filon_zz_incremental(s, Sqrt1mkk, w, -1., 1.,
+                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor, t_cut_prev,
+                        cum_zz1_re, cum_zz1_im, zz_r1, zz_i1);
+    filon_zz_incremental(s, Sqrt1mkk, w, +1., 0.,
+                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor, t_cut_prev,
+                        cum_zz2_re, cum_zz2_im, zz_r2, zz_i2);
 
     double xx1, xi1, yy1, yi1, xz1, xzi1;
     double xx2, xi2, yy2, yi2, xz2, xzi2;
-    filon_u<false,true>(s_off, Sqrt1mkk, w, -1., 1.,
-                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor,
-                        _u, _v, xx1, xi1, yy1, yi1, xz1, xzi1);
-    filon_u<false,true>(s_off, Sqrt1mkk, w, +1., 0.,
-                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor,
-                        _u, _v, xx2, xi2, yy2, yi2, xz2, xzi2);
+    filon_xyz_incremental(s_off, Sqrt1mkk, w, -1., 1.,
+                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor, t_cut_prev,
+                        cum_xx1_re, cum_xx1_im, cum_yy1_re, cum_yy1_im, cum_xz1_re, cum_xz1_im,
+                        xx1, xi1, yy1, yi1, xz1, xzi1);
+    filon_xyz_incremental(s_off, Sqrt1mkk, w, +1., 0.,
+                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor, t_cut_prev,
+                        cum_xx2_re, cum_xx2_im, cum_yy2_re, cum_yy2_im, cum_xz2_re, cum_xz2_im,
+                        xx2, xi2, yy2, yi2, xz2, xzi2);
 
     // --- z-integrals ---
     double iz1_zz = 0., iz2_zz = 0.;
@@ -437,6 +510,13 @@ GpuIntegrator::GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
     alloc_and_copy(&d_s_,    slist_);
 
     CUDA_CHECK(cudaMalloc(&d_intbuf_, n_w_ * n_k_ * n_s_ * 6 * sizeof(double)));
+
+    // Persistent plateau-accumulator buffer: allocated once, zeroed once, and
+    // NOT reset between Compute() calls (unlike d_intbuf_ above) — each
+    // thread's slot carries the running plateau integral forward across time
+    // steps. See gw_kernel's cumbuf usage and d_cumbuf_'s declaration.
+    CUDA_CHECK(cudaMalloc(&d_cumbuf_, n_w_ * n_k_ * n_s_ * 16 * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_cumbuf_, 0, n_w_ * n_k_ * n_s_ * 16 * sizeof(double)));
 }
 
 // ---------------------------------------------------------------------------
@@ -452,18 +532,34 @@ GpuIntegrator::~GpuIntegrator()
     cudaFree(d_k_);
     cudaFree(d_s_);
     cudaFree(d_intbuf_);
+    cudaFree(d_cumbuf_);
 }
 
 // ---------------------------------------------------------------------------
 // Compute — launch kernel, then reduce on CPU
+//
+// The plateau portion of the u-integral is accumulated incrementally across
+// calls in device memory (d_cumbuf_, allocated once in the constructor), so
+// this mutates persisted state and must be called with strictly increasing
+// i_t starting at 0.
 // ---------------------------------------------------------------------------
 
-std::vector<double> GpuIntegrator::Compute(int i_t) const
+std::vector<double> GpuIntegrator::Compute(int i_t)
 {
+    if (i_t != last_i_t_processed_ + 1) {
+        throw std::runtime_error(
+            "GpuIntegrator::Compute: i_t must be called in strictly "
+            "increasing order starting at 0 (plateau u-integral is "
+            "accumulated incrementally in device memory); got i_t=" +
+            std::to_string(i_t) + " after last_i_t_processed_=" +
+            std::to_string(last_i_t_processed_));
+    }
+
     double shift  = t_m_base_  - times_[i_t];
     double t_cut  = t_cut_base_ - shift;
     double t_m    = t_m_base_   - shift;
     double t_max  = t_max_base_ - shift;
+    const double t_cut_prev = t_cut_prev_;
 
     n_floor_ = param_floor_ > 0 ? param_floor_ : 8192;
 
@@ -484,8 +580,8 @@ std::vector<double> GpuIntegrator::Compute(int i_t) const
         ds_, dz_,
         d_z_, d_w_, d_k_, d_s_,
         t_cut, t_m, t_0_, t_max,
-        cutoff_type_, n_floor_,
-        d_intbuf_
+        cutoff_type_, n_floor_, t_cut_prev,
+        d_intbuf_, d_cumbuf_
     );
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -535,6 +631,8 @@ std::vector<double> GpuIntegrator::Compute(int i_t) const
         spectrum[iw] = int_k;
     }
 
+    t_cut_prev_ = t_cut;
+    last_i_t_processed_ = i_t;
     return spectrum;
 }
 
