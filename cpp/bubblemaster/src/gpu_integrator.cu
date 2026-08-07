@@ -536,7 +536,28 @@ GpuIntegrator::~GpuIntegrator()
 }
 
 // ---------------------------------------------------------------------------
-// Compute — launch kernel, then reduce on CPU
+// Compute / ComputeAmplitude — thin wrappers over the shared launch+reduce
+// path in RunAndReduce().
+// ---------------------------------------------------------------------------
+
+std::vector<double> GpuIntegrator::Compute(int i_t)
+{
+    return RunAndReduce(i_t, nullptr, nullptr);
+}
+
+AmplitudeResult GpuIntegrator::ComputeAmplitude(int i_t)
+{
+    AmplitudeResult res;
+    res.w      = wlist_;
+    res.klist  = klist_;
+    res.amp_re.assign(n_w_ * n_k_, 0.);
+    res.amp_im.assign(n_w_ * n_k_, 0.);
+    res.spectrum = RunAndReduce(i_t, &res.amp_re, &res.amp_im);
+    return res;
+}
+
+// ---------------------------------------------------------------------------
+// RunAndReduce — launch kernel, then reduce on CPU
 //
 // The plateau portion of the u-integral is accumulated incrementally across
 // calls in device memory (d_cumbuf_, allocated once in the constructor), so
@@ -544,11 +565,13 @@ GpuIntegrator::~GpuIntegrator()
 // i_t starting at 0.
 // ---------------------------------------------------------------------------
 
-std::vector<double> GpuIntegrator::Compute(int i_t)
+std::vector<double> GpuIntegrator::RunAndReduce(int i_t,
+                                                 std::vector<double> *out_amp_re,
+                                                 std::vector<double> *out_amp_im)
 {
     if (i_t != last_i_t_processed_ + 1) {
         throw std::runtime_error(
-            "GpuIntegrator::Compute: i_t must be called in strictly "
+            "GpuIntegrator::RunAndReduce: i_t must be called in strictly "
             "increasing order starting at 0 (plateau u-integral is "
             "accumulated incrementally in device memory); got i_t=" +
             std::to_string(i_t) + " after last_i_t_processed_=" +
@@ -563,9 +586,10 @@ std::vector<double> GpuIntegrator::Compute(int i_t)
 
     n_floor_ = param_floor_ > 0 ? param_floor_ : 8192;
 
-    std::cout << "GpuIntegrator::Compute i_t=" << i_t
+    std::cout << "GpuIntegrator::RunAndReduce i_t=" << i_t
               << " shift=" << shift << " t_m=" << t_m
-              << " n_floor=" << n_floor_ << "\n";
+              << " n_floor=" << n_floor_
+              << (out_amp_re ? "  (amplitude)" : "") << "\n";
 
     std::size_t total = n_w_ * n_k_ * n_s_;
     CUDA_CHECK(cudaMemset(d_intbuf_, 0, total * 6 * sizeof(double)));
@@ -622,6 +646,10 @@ std::vector<double> GpuIntegrator::Compute(int i_t)
 
             double re = szz_r*Onemkk + sxa_r - TwokSq*sxz_r;
             double im = szz_i*Onemkk + sxa_i - TwokSq*sxz_i;
+            if (out_amp_re) {
+                (*out_amp_re)[iw * n_k_ + ik] = re;
+                (*out_amp_im)[iw * n_k_ + ik] = im;
+            }
             double intk_val = (re*re + im*im) * w*w*w * 2.*M_PI;
 
             double fk = (ik == 0 || ik == n_k_-1) ? 1. : 2.;

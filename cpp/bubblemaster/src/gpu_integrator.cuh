@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include "amplitude.h"
 #include "setup.h"
 
 // Drop-in replacement for Integrator / FilonIntegrator that runs the
@@ -31,6 +32,14 @@ public:
     // matches how main.cpp already drives it. Calling out of order throws.
     std::vector<double> Compute(int i_t);
 
+    // Like Compute, but also returns the pre-squaring complex amplitude
+    // A(w, cos_theta) for each (frequency, angle) bin. Same ordering
+    // requirement as Compute — shares the same incremental device-side
+    // plateau state, so the two must not be interleaved for a given i_t
+    // sequence (call one or the other consistently across all i_t for a
+    // given GpuIntegrator instance, same as the CPU integrators).
+    AmplitudeResult ComputeAmplitude(int i_t);
+
     const std::vector<double> &GetW()     const { return wlist_; }
     const std::vector<double> &GetSlist() const { return slist_; }
     const std::vector<double> &GetZ()     const { return z_; }
@@ -41,6 +50,17 @@ private:
 
     void build_phi2(const std::vector<std::vector<double>> &input_phi,
                     std::vector<double> &phi2_host) const;
+
+    // Shared implementation for Compute()/ComputeAmplitude(): launches the
+    // kernel, reads back intbuf, and reduces over i_s to get (re, im) and the
+    // squared spectrum per (i_w, i_k). If out_amp_re/out_amp_im are non-null,
+    // also writes the pre-squaring (re, im) into them (row-major
+    // [i_w * n_k_ + i_k], matching AmplitudeResult::amp_re/amp_im).
+    // Enforces the strictly-increasing-i_t ordering requirement and advances
+    // t_cut_prev_/last_i_t_processed_ on success.
+    std::vector<double> RunAndReduce(int i_t,
+                                     std::vector<double> *out_amp_re,
+                                     std::vector<double> *out_amp_im);
 
     std::size_t n_w_, n_k_, n_s_, n_z_;
     double ds_, dz_;
