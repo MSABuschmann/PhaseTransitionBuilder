@@ -47,17 +47,41 @@ FilonIntegrator::FilonIntegrator(const std::vector<std::vector<double>> &input_p
               << (n_s_ * n_z_ * 8) / (1 << 20) << " MB per array\n"
               << "  t_cut=" << t_cut_base_ << " t_m=" << t_m_base_
               << " t_max=" << t_max_base_ << "\n\n";
+
+    const std::size_t total = n_w_ * n_k_ * n_s_;
+    cum_zz1_re_.assign(total, 0.); cum_zz1_im_.assign(total, 0.);
+    cum_zz2_re_.assign(total, 0.); cum_zz2_im_.assign(total, 0.);
+    cum_xx1_re_.assign(total, 0.); cum_xx1_im_.assign(total, 0.);
+    cum_xx2_re_.assign(total, 0.); cum_xx2_im_.assign(total, 0.);
+    cum_yy1_re_.assign(total, 0.); cum_yy1_im_.assign(total, 0.);
+    cum_yy2_re_.assign(total, 0.); cum_yy2_im_.assign(total, 0.);
+    cum_xz1_re_.assign(total, 0.); cum_xz1_im_.assign(total, 0.);
+    cum_xz2_re_.assign(total, 0.); cum_xz2_im_.assign(total, 0.);
 }
 
 // ---------------------------------------------------------------------------
 // Compute for one time index
+//
+// The plateau portion of the u-integral is accumulated incrementally across
+// calls (see cum_* members and integral_u_filon_incremental), so this
+// mutates persisted state and must be called with strictly increasing i_t
+// starting at 0.
 // ---------------------------------------------------------------------------
 
-std::vector<double> FilonIntegrator::Compute(int i_t) const {
+std::vector<double> FilonIntegrator::Compute(int i_t) {
+    if (i_t != last_i_t_processed_ + 1) {
+        throw std::runtime_error(
+            "FilonIntegrator::Compute: i_t must be called in strictly "
+            "increasing order starting at 0 (plateau u-integral is "
+            "accumulated incrementally); got i_t=" + std::to_string(i_t) +
+            " after last_i_t_processed_=" + std::to_string(last_i_t_processed_));
+    }
+
     double shift = t_m_base_ - times_[i_t];
     double t_cut = t_cut_base_ - shift;
     double t_m   = t_m_base_   - shift;
     double t_max = t_max_base_ - shift;
+    const double t_cut_prev = t_cut_prev_;
 
     std::cout << "Compute i_t=" << i_t
               << " shift=" << shift
@@ -66,24 +90,40 @@ std::vector<double> FilonIntegrator::Compute(int i_t) const {
 
     std::vector<double> result(n_w_);
     for (std::size_t i_w = 0; i_w < n_w_; ++i_w) {
-        result[i_w] = k_integral(wlist_[i_w], t_cut, t_m, t_max);
+        result[i_w] = k_integral(i_w, t_cut, t_m, t_max, t_cut_prev);
     }
+
+    t_cut_prev_ = t_cut;
+    last_i_t_processed_ = i_t;
     return result;
 }
 
 // ---------------------------------------------------------------------------
-// Filon u-integral: all four stress-tensor components simultaneously
+// Filon u-integral: all four stress-tensor components simultaneously.
+//
+// Incremental version: the plateau [umin, u_split] doesn't depend on i_t
+// (C1==1 there identically, since t=s*u < t_cut throughout), so instead of
+// re-running Filon over the whole growing [umin, u_split] every time step, we
+// only integrate the new slice since the previous step's u_split
+// (t_cut_prev/s) and add it into the persisted cum_* state. The transition
+// window [u_split, u_top] has fixed width (set by t_max-t_cut) and just
+// slides in u as t_cut advances, so it's recomputed fresh each step — same
+// as before, just no longer paying for the plateau's ever-growing range.
 // ---------------------------------------------------------------------------
 
-void FilonIntegrator::integral_u_filon(double s, double Sqrt1mkk, double w,
-                                        double sign, double umin,
-                                        double t_cut, double t_m, double t_max,
-                                        double &zz_r, double &zz_i,
-                                        double &xx_r, double &xx_i,
-                                        double &yy_r, double &yy_i,
-                                        double &xz_r, double &xz_i) const {
+void FilonIntegrator::integral_u_filon_incremental(
+        double s, double Sqrt1mkk, double w,
+        double sign, double umin,
+        double t_cut, double t_m, double t_max, double t_cut_prev,
+        double &cum_zz_r, double &cum_zz_i,
+        double &cum_xx_r, double &cum_xx_i,
+        double &cum_yy_r, double &cum_yy_i,
+        double &cum_xz_r, double &cum_xz_i,
+        double &zz_r, double &zz_i,
+        double &xx_r, double &xx_i,
+        double &yy_r, double &yy_i,
+        double &xz_r, double &xz_i) const {
     // C1 = 0 for t = s*u >= t_max → integrand is zero above u = t_max/s.
-    // Truncating at u_top avoids wasting panels in the dead zone.
     const double u_top   = t_max / s;
     // C1 has a C¹ but not C² junction at t = t_cut (second derivative jumps
     // where the flat-1 region meets the smooth formula).  Splitting at the
@@ -92,8 +132,14 @@ void FilonIntegrator::integral_u_filon(double s, double Sqrt1mkk, double w,
     const double u_split = t_cut / s;
 
     if (u_top <= umin) {
-        // Entire interval lies in the dead zone.
-        zz_r = zz_i = xx_r = xx_i = yy_r = yy_i = xz_r = xz_i = 0.;
+        // Entire interval lies in the dead zone — cum_* is untouched (stays
+        // at whatever it already was, 0 if this s has never left the dead
+        // zone, which is the only way it can be exactly here since u_top
+        // only grows with i_t).
+        zz_r = cum_zz_r; zz_i = cum_zz_i;
+        xx_r = cum_xx_r; xx_i = cum_xx_i;
+        yy_r = cum_yy_r; yy_i = cum_yy_i;
+        xz_r = cum_xz_r; xz_i = cum_xz_i;
         return;
     }
 
@@ -153,29 +199,50 @@ void FilonIntegrator::integral_u_filon(double s, double Sqrt1mkk, double w,
         filon_cos_sin(g_xz.data(), N, a, h, omega, r_xz, i_xz);
     };
 
-    if (u_split > umin && u_split < u_top) {
-        double lo_zz_r, lo_zz_i, lo_xx_r, lo_xx_i, lo_yy_r, lo_yy_i, lo_xz_r, lo_xz_i;
-        double hi_zz_r, hi_zz_i, hi_xx_r, hi_xx_i, hi_yy_r, hi_yy_i, hi_xz_r, hi_xz_i;
-        run_segment(umin,    u_split, lo_zz_r, lo_zz_i, lo_xx_r, lo_xx_i, lo_yy_r, lo_yy_i, lo_xz_r, lo_xz_i);
-        run_segment(u_split, u_top,   hi_zz_r, hi_zz_i, hi_xx_r, hi_xx_i, hi_yy_r, hi_yy_i, hi_xz_r, hi_xz_i);
-        zz_r = lo_zz_r + hi_zz_r;  zz_i = lo_zz_i + hi_zz_i;
-        xx_r = lo_xx_r + hi_xx_r;  xx_i = lo_xx_i + hi_xx_i;
-        yy_r = lo_yy_r + hi_yy_r;  yy_i = lo_yy_i + hi_yy_i;
-        xz_r = lo_xz_r + hi_xz_r;  xz_i = lo_xz_i + hi_xz_i;
-    } else {
-        run_segment(umin, u_top, zz_r, zz_i, xx_r, xx_i, yy_r, yy_i, xz_r, xz_i);
+    const double plateau_now  = std::max(umin, u_split);
+    const double plateau_prev = std::max(umin, t_cut_prev / s);
+
+    if (plateau_now > plateau_prev) {
+        double d_zz_r, d_zz_i, d_xx_r, d_xx_i, d_yy_r, d_yy_i, d_xz_r, d_xz_i;
+        run_segment(plateau_prev, plateau_now,
+                    d_zz_r, d_zz_i, d_xx_r, d_xx_i, d_yy_r, d_yy_i, d_xz_r, d_xz_i);
+        cum_zz_r += d_zz_r; cum_zz_i += d_zz_i;
+        cum_xx_r += d_xx_r; cum_xx_i += d_xx_i;
+        cum_yy_r += d_yy_r; cum_yy_i += d_yy_i;
+        cum_xz_r += d_xz_r; cum_xz_i += d_xz_i;
     }
+
+    double w_zz_r = 0., w_zz_i = 0., w_xx_r = 0., w_xx_i = 0.;
+    double w_yy_r = 0., w_yy_i = 0., w_xz_r = 0., w_xz_i = 0.;
+    if (u_top > plateau_now) {
+        run_segment(plateau_now, u_top,
+                    w_zz_r, w_zz_i, w_xx_r, w_xx_i, w_yy_r, w_yy_i, w_xz_r, w_xz_i);
+    }
+
+    zz_r = cum_zz_r + w_zz_r;  zz_i = cum_zz_i + w_zz_i;
+    xx_r = cum_xx_r + w_xx_r;  xx_i = cum_xx_i + w_xx_i;
+    yy_r = cum_yy_r + w_yy_r;  yy_i = cum_yy_i + w_yy_i;
+    xz_r = cum_xz_r + w_xz_r;  xz_i = cum_xz_i + w_xz_i;
 }
 
 // ---------------------------------------------------------------------------
 // ComputeAmplitude: like Compute but retains pre-squaring A(w, cos_theta)
 // ---------------------------------------------------------------------------
 
-AmplitudeResult FilonIntegrator::ComputeAmplitude(int i_t) const {
+AmplitudeResult FilonIntegrator::ComputeAmplitude(int i_t) {
+    if (i_t != last_i_t_processed_ + 1) {
+        throw std::runtime_error(
+            "FilonIntegrator::ComputeAmplitude: i_t must be called in "
+            "strictly increasing order starting at 0 (plateau u-integral is "
+            "accumulated incrementally); got i_t=" + std::to_string(i_t) +
+            " after last_i_t_processed_=" + std::to_string(last_i_t_processed_));
+    }
+
     double shift = t_m_base_ - times_[i_t];
     double t_cut = t_cut_base_ - shift;
     double t_m   = t_m_base_  - shift;
     double t_max = t_max_base_ - shift;
+    const double t_cut_prev = t_cut_prev_;
 
     std::cout << "ComputeAmplitude i_t=" << i_t
               << " shift=" << shift
@@ -191,13 +258,16 @@ AmplitudeResult FilonIntegrator::ComputeAmplitude(int i_t) const {
 
     for (std::size_t i_w = 0; i_w < n_w_; ++i_w) {
         std::vector<double> row_re(n_k_, 0.), row_im(n_k_, 0.);
-        res.spectrum[i_w] = k_integral(wlist_[i_w], t_cut, t_m, t_max,
+        res.spectrum[i_w] = k_integral(i_w, t_cut, t_m, t_max, t_cut_prev,
                                        &row_re, &row_im);
         std::copy(row_re.begin(), row_re.end(),
                   res.amp_re.begin() + i_w * n_k_);
         std::copy(row_im.begin(), row_im.end(),
                   res.amp_im.begin() + i_w * n_k_);
     }
+
+    t_cut_prev_ = t_cut;
+    last_i_t_processed_ = i_t;
     return res;
 }
 
@@ -207,10 +277,12 @@ AmplitudeResult FilonIntegrator::ComputeAmplitude(int i_t) const {
 // NUMA-local rows.
 // ---------------------------------------------------------------------------
 
-double FilonIntegrator::k_integral(double w,
+double FilonIntegrator::k_integral(std::size_t i_w,
                                     double t_cut, double t_m, double t_max,
+                                    double t_cut_prev,
                                     std::vector<double> *out_amp_re,
-                                    std::vector<double> *out_amp_im) const {
+                                    std::vector<double> *out_amp_im) {
+    const double w = wlist_[i_w];
     double int_k = 0.;
     auto klist   = linspace(0., 1., static_cast<int>(n_k_));
     const double dk = klist[1] - klist[0];
@@ -224,9 +296,21 @@ double FilonIntegrator::k_integral(double w,
         const double Sqrt1mkk = std::sqrt(Onemkk);
         const double TwokSqrt = 2. * k * Sqrt1mkk;
 
+        // Base index into the persisted cumulative-plateau cache for this (i_w, i_k)
+        const std::size_t z_base = (i_w * n_k_ + i_k) * n_s_;
+
         double int_s_zz_real    = 0., int_s_zz_imag    = 0.;
         double int_s_xandy_real = 0., int_s_xandy_imag = 0.;
         double int_s_xz_real    = 0., int_s_xz_imag    = 0.;
+
+        double *cum_zz1_re = cum_zz1_re_.data() + z_base, *cum_zz1_im = cum_zz1_im_.data() + z_base;
+        double *cum_zz2_re = cum_zz2_re_.data() + z_base, *cum_zz2_im = cum_zz2_im_.data() + z_base;
+        double *cum_xx1_re = cum_xx1_re_.data() + z_base, *cum_xx1_im = cum_xx1_im_.data() + z_base;
+        double *cum_xx2_re = cum_xx2_re_.data() + z_base, *cum_xx2_im = cum_xx2_im_.data() + z_base;
+        double *cum_yy1_re = cum_yy1_re_.data() + z_base, *cum_yy1_im = cum_yy1_im_.data() + z_base;
+        double *cum_yy2_re = cum_yy2_re_.data() + z_base, *cum_yy2_im = cum_yy2_im_.data() + z_base;
+        double *cum_xz1_re = cum_xz1_re_.data() + z_base, *cum_xz1_im = cum_xz1_im_.data() + z_base;
+        double *cum_xz2_re = cum_xz2_re_.data() + z_base, *cum_xz2_im = cum_xz2_im_.data() + z_base;
 
 #pragma omp parallel for schedule(static) \
     reduction(+:int_s_zz_real, int_s_zz_imag, \
@@ -237,23 +321,50 @@ double FilonIntegrator::k_integral(double w,
             const double s_off = s - 0.5 * ds_;
             if (s == 0.) continue;
 
-            // u-integrals via Filon
+            // u-integrals via Filon (incremental — see integral_u_filon_incremental).
+            // Each call computes all four (zz,xx,yy,xz) stress-tensor components
+            // together (Filon's cost is bundled per evaluation point), but only
+            // zz is used from the "s" calls and only xx/yy/xz from the "s_off"
+            // calls below (matches the original code, which also discarded the
+            // other half of each call's output). The unused outputs' cum_* state
+            // is therefore intentionally NOT persisted — fresh throwaway locals
+            // (reset to 0 each call) stand in for it, since a call that starts
+            // from 0 every time and whose result is discarded can't corrupt
+            // anything, and reusing a persisted slot across two different
+            // physical points (s vs s_off) here would corrupt real state.
             double zz_r1, zz_i1, xx_r1, xx_i1, yy_r1, yy_i1, xz_r1, xz_i1;
             double zz_r2, zz_i2, xx_r2, xx_i2, yy_r2, yy_i2, xz_r2, xz_i2;
-            integral_u_filon(s, Sqrt1mkk, w, -1., 1.,
-                             t_cut, t_m, t_max,
+            double junk1_re = 0., junk1_im = 0., junk2_re = 0., junk2_im = 0.;
+            double junk3_re = 0., junk3_im = 0.;
+            integral_u_filon_incremental(s, Sqrt1mkk, w, -1., 1.,
+                             t_cut, t_m, t_max, t_cut_prev,
+                             cum_zz1_re[i_s], cum_zz1_im[i_s],
+                             junk1_re, junk1_im, junk2_re, junk2_im, junk3_re, junk3_im,
                              zz_r1, zz_i1, xx_r1, xx_i1, yy_r1, yy_i1, xz_r1, xz_i1);
-            integral_u_filon(s, Sqrt1mkk, w, +1., 0.,
-                             t_cut, t_m, t_max,
+            junk1_re = junk1_im = junk2_re = junk2_im = junk3_re = junk3_im = 0.;
+            integral_u_filon_incremental(s, Sqrt1mkk, w, +1., 0.,
+                             t_cut, t_m, t_max, t_cut_prev,
+                             cum_zz2_re[i_s], cum_zz2_im[i_s],
+                             junk1_re, junk1_im, junk2_re, junk2_im, junk3_re, junk3_im,
                              zz_r2, zz_i2, xx_r2, xx_i2, yy_r2, yy_i2, xz_r2, xz_i2);
 
             double zzx_r1, zzx_i1, xx_off_r1, xx_off_i1, yy_off_r1, yy_off_i1, xz_off_r1, xz_off_i1;
             double zzx_r2, zzx_i2, xx_off_r2, xx_off_i2, yy_off_r2, yy_off_i2, xz_off_r2, xz_off_i2;
-            integral_u_filon(s_off, Sqrt1mkk, w, -1., 1.,
-                             t_cut, t_m, t_max,
+            double junk_zz_re = 0., junk_zz_im = 0.;
+            integral_u_filon_incremental(s_off, Sqrt1mkk, w, -1., 1.,
+                             t_cut, t_m, t_max, t_cut_prev,
+                             junk_zz_re, junk_zz_im,
+                             cum_xx1_re[i_s], cum_xx1_im[i_s],
+                             cum_yy1_re[i_s], cum_yy1_im[i_s],
+                             cum_xz1_re[i_s], cum_xz1_im[i_s],
                              zzx_r1, zzx_i1, xx_off_r1, xx_off_i1, yy_off_r1, yy_off_i1, xz_off_r1, xz_off_i1);
-            integral_u_filon(s_off, Sqrt1mkk, w, +1., 0.,
-                             t_cut, t_m, t_max,
+            junk_zz_re = 0.; junk_zz_im = 0.;
+            integral_u_filon_incremental(s_off, Sqrt1mkk, w, +1., 0.,
+                             t_cut, t_m, t_max, t_cut_prev,
+                             junk_zz_re, junk_zz_im,
+                             cum_xx2_re[i_s], cum_xx2_im[i_s],
+                             cum_yy2_re[i_s], cum_yy2_im[i_s],
+                             cum_xz2_re[i_s], cum_xz2_im[i_s],
                              zzx_r2, zzx_i2, xx_off_r2, xx_off_i2, yy_off_r2, yy_off_i2, xz_off_r2, xz_off_i2);
 
             // z-integrals — all reads are NUMA-local with schedule(static)
