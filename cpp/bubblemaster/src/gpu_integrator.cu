@@ -141,7 +141,8 @@ __device__ __forceinline__ void fs_result(const FStream &fs,
 }
 
 // ---------------------------------------------------------------------------
-// N for one sub-interval: 64 panels per Bessel oscillation, floor=2048.
+// N for one sub-interval: 64 panels per Bessel oscillation, floor=n_floor
+// (default 8192, matching CPU Filon's FILON_N_MIN — see filon.h).
 // Uses delta-ib = ib(b) - ib(a) so each segment is resolved independently.
 // ---------------------------------------------------------------------------
 

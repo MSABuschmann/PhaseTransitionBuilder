@@ -23,7 +23,7 @@
 #ifdef FILON_N_TEST
 static constexpr int FILON_N_MIN = FILON_N_TEST;
 #else
-static constexpr int FILON_N_MIN = 2048;
+static constexpr int FILON_N_MIN = 8192;
 #endif
 
 // ---------------------------------------------------------------------------
