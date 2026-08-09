@@ -357,6 +357,11 @@ __global__ void gw_kernel(
     int cutoff_type, int n_floor, double t_cut_prev,
     double * __restrict__ intbuf,        // [n_w * n_k * n_s * 6]
     double * __restrict__ cumbuf         // [n_w * n_k * n_s * 16] — persists across launches
+#ifdef GW_KERNEL_TIMING
+    , long long * __restrict__ timebuf   // [n_w*n_k*n_s*5] per-thread cycle counts:
+                                          // [u_integral, zz, xa, xz, tail] — diagnostic
+                                          // build only, see Makefile's gpu_profile target.
+#endif
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n_w * n_k * n_s) return;
@@ -371,6 +376,10 @@ __global__ void gw_kernel(
     double w = w_arr[i_w];
     double k = k_arr[i_k];
     if (k == 1. || k == -1.) return;
+
+#ifdef GW_KERNEL_TIMING
+    long long t0 = clock64();
+#endif
 
     double k_sq     = k * k;
     double Onemkk   = 1. - k_sq;
@@ -405,6 +414,10 @@ __global__ void gw_kernel(
                         cum_xx2_re, cum_xx2_im, cum_yy2_re, cum_yy2_im, cum_xz2_re, cum_xz2_im,
                         xx2, xi2, yy2, yi2, xz2, xzi2);
 
+#ifdef GW_KERNEL_TIMING
+    long long t1 = clock64();
+#endif
+
     // --- z-integrals ---
     // phi/phi2 layout is [iz * n_s + is] (transposed vs. the natural
     // [is][iz]) so that consecutive threads (consecutive i_s) hit
@@ -420,6 +433,10 @@ __global__ void gw_kernel(
         iz2_zz += dz * 2.0 * czm * q2 * q2;
     }
 
+#ifdef GW_KERNEL_TIMING
+    long long t2 = clock64();
+#endif
+
     double iz1_xa = 0., iz2_xa = 0.;
     for (int iz = 0; iz < n_z; ++iz) {
         double fz  = (iz == 0 || iz == n_z-1) ? 0.5 : 1.0;
@@ -429,6 +446,10 @@ __global__ void gw_kernel(
         iz1_xa += fz * dz * 2.0 * cz * q1 * q1;
         iz2_xa += fz * dz * 2.0 * cz * q2 * q2;
     }
+
+#ifdef GW_KERNEL_TIMING
+    long long t3 = clock64();
+#endif
 
     double iz1_xz = 0., iz2_xz = 0.;
     for (int iz = 1; iz < n_z; ++iz) {
@@ -445,6 +466,10 @@ __global__ void gw_kernel(
         iz2_xz += dz * 2.0 * szm * ds2 * dz2;
     }
 
+#ifdef GW_KERNEL_TIMING
+    long long t4 = clock64();
+#endif
+
     // --- Accumulate linear per-s contributions ---
     double fac    = (i_s == 0 || i_s == n_s-1) ? 0.5 : 1.;
     double pre_zz = fac * (double)i_s * (double)i_s * ds * ds * ds;
@@ -458,6 +483,16 @@ __global__ void gw_kernel(
     intbuf[base + 3] = pre_xa * ((xi1*k_sq - yi1)*iz1_xa + (xi2*k_sq - yi2)*iz2_xa);
     intbuf[base + 4] = pre_xz * (xz1*iz1_xz + xz2*iz2_xz);
     intbuf[base + 5] = pre_xz * (xzi1*iz1_xz + xzi2*iz2_xz);
+
+#ifdef GW_KERNEL_TIMING
+    long long t5 = clock64();
+    long long *tb = timebuf + idx * 5;
+    tb[0] = t1 - t0;   // u-integral
+    tb[1] = t2 - t1;   // zz z-integral loop
+    tb[2] = t3 - t2;   // xa z-integral loop
+    tb[3] = t4 - t3;   // xz z-integral loop
+    tb[4] = t5 - t4;   // tail (accumulate + intbuf write)
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +558,10 @@ GpuIntegrator::GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
     // steps. See gw_kernel's cumbuf usage and d_cumbuf_'s declaration.
     CUDA_CHECK(cudaMalloc(&d_cumbuf_, n_w_ * n_k_ * n_s_ * 16 * sizeof(double)));
     CUDA_CHECK(cudaMemset(d_cumbuf_, 0, n_w_ * n_k_ * n_s_ * 16 * sizeof(double)));
+
+#ifdef GW_KERNEL_TIMING
+    CUDA_CHECK(cudaMalloc(&d_timebuf_, n_w_ * n_k_ * n_s_ * 5 * sizeof(long long)));
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -539,6 +578,9 @@ GpuIntegrator::~GpuIntegrator()
     cudaFree(d_s_);
     cudaFree(d_intbuf_);
     cudaFree(d_cumbuf_);
+#ifdef GW_KERNEL_TIMING
+    cudaFree(d_timebuf_);
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -612,9 +654,42 @@ std::vector<double> GpuIntegrator::RunAndReduce(int i_t,
         t_cut, t_m, t_0_, t_max,
         cutoff_type_, n_floor_, t_cut_prev,
         d_intbuf_, d_cumbuf_
+#ifdef GW_KERNEL_TIMING
+        , d_timebuf_
+#endif
     );
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
+
+#ifdef GW_KERNEL_TIMING
+    // Diagnostic-build-only: sum clock64() cycles per phase across all
+    // threads and print the relative breakdown. Since the z-integral loops
+    // run a fixed n_z iterations regardless of thread, and the sum (rather
+    // than max) is a standard proxy for "how much this phase matters" when
+    // per-phase costs are reasonably uniform across threads, this is a rough
+    // but honest proportional breakdown, not a precise wall-clock accounting.
+    {
+        std::vector<long long> tbuf(total * 5);
+        CUDA_CHECK(cudaMemcpy(tbuf.data(), d_timebuf_,
+                              tbuf.size() * sizeof(long long),
+                              cudaMemcpyDeviceToHost));
+        long long sums[5] = {0, 0, 0, 0, 0};
+        for (std::size_t i = 0; i < total; ++i)
+            for (int p = 0; p < 5; ++p)
+                sums[p] += tbuf[i * 5 + p];
+        long long grand_total = sums[0] + sums[1] + sums[2] + sums[3] + sums[4];
+        static const char *names[5] = {"u_integral", "zz_loop", "xa_loop", "xz_loop", "tail"};
+        std::cout << "  [timing breakdown, i_t=" << i_t << "]";
+        if (grand_total > 0) {
+            for (int p = 0; p < 5; ++p) {
+                double pct = 100.0 * static_cast<double>(sums[p])
+                                   / static_cast<double>(grand_total);
+                std::cout << "  " << names[p] << "=" << pct << "%";
+            }
+        }
+        std::cout << "\n";
+    }
+#endif
 
     // --- Copy intermediate buffer back and reduce on CPU ---
     std::vector<double> buf(total * 6);

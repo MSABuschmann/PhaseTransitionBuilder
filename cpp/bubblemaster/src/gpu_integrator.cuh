@@ -87,6 +87,14 @@ private:
     double *d_s_      = nullptr;   // [n_s]
     double *d_intbuf_ = nullptr;   // [n_w * n_k * n_s * 6]  — reused each Compute()
 
+#ifdef GW_KERNEL_TIMING
+    // Diagnostic-build-only: per-thread clock64() cycle counts for
+    // [u_integral, zz, xa, xz, tail], reused each RunAndReduce() call.
+    // Not present in the normal production binary — see Makefile's
+    // gpu_profile target and gw_kernel's timebuf parameter.
+    long long *d_timebuf_ = nullptr;   // [n_w * n_k * n_s * 5]
+#endif
+
     // Persisted cumulative plateau state for the u-integral, one 16-double
     // slot per (i_w,i_k,i_s) thread [zz1,xx1,yy1,xz1,zz2,xx2,yy2,xz2] x
     // (re,im); layout is [idx*16 + slot], idx = i_w*n_k*n_s + i_k*n_s + i_s,

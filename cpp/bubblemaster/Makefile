@@ -29,9 +29,10 @@ SRCS_GSL   = $(SRCS_COMMON) $(SRCDIR)/integrator.cpp
 SRCS_FILON = $(SRCS_COMMON) $(SRCDIR)/filon_integrator.cpp
 SRCS_GPU   = $(SRCS_COMMON)   # .cu compiled separately below
 
-OBJS_GSL   = $(SRCS_GSL:.cpp=_gsl.o)
-OBJS_FILON = $(SRCS_FILON:.cpp=_filon.o)
-OBJS_GPU   = $(SRCS_GPU:.cpp=_gpu.o) $(SRCDIR)/gpu_integrator_gpu.o
+OBJS_GSL         = $(SRCS_GSL:.cpp=_gsl.o)
+OBJS_FILON       = $(SRCS_FILON:.cpp=_filon.o)
+OBJS_GPU         = $(SRCS_GPU:.cpp=_gpu.o) $(SRCDIR)/gpu_integrator_gpu.o
+OBJS_GPU_PROFILE = $(SRCS_GPU:.cpp=_gpu_profile.o) $(SRCDIR)/gpu_integrator_gpu_profile.o
 
 # Local macOS build (Homebrew clang + libomp + HDF5 + GSL)
 CXX_LOCAL      = clang++
@@ -44,13 +45,14 @@ LIBS_LOCAL     = -L$(HDF5_LOCAL)/lib -lhdf5_cpp -lhdf5 \
                  -L$(GSL_LOCAL)/lib -lgsl -lgslcblas \
                  -L$(LIBOMP_LOCAL)/lib -lomp -lm
 
-.PHONY: all gsl filon gpu local clean
+.PHONY: all gsl filon gpu gpu_profile local clean
 
 all: gsl filon gpu
 
-gsl:   bubblemaster
-filon: bubblemaster_filon
-gpu:   bubblemaster_gpu
+gsl:         bubblemaster
+filon:       bubblemaster_filon
+gpu:         bubblemaster_gpu
+gpu_profile: bubblemaster_gpu_profile
 
 # --- GSL build ---
 bubblemaster: $(OBJS_GSL)
@@ -82,6 +84,20 @@ $(SRCDIR)/%_gpu.o: $(SRCDIR)/%.cpp
 $(SRCDIR)/gpu_integrator_gpu.o: $(SRCDIR)/gpu_integrator.cu
 	$(NVCC) $(NVCCFLAGS) $(INCLUDES) -c -o $@ $<
 
+# --- GPU profiling build ---
+# Same as the gpu target, but with clock64()-based in-kernel timing
+# instrumentation compiled in (GW_KERNEL_TIMING). Diagnostic only: works
+# around DCGM blocking ncu/Nsight Compute on shared/exclusive nodes alike.
+# The normal `gpu` target/binary is completely untouched by this flag.
+bubblemaster_gpu_profile: $(OBJS_GPU_PROFILE)
+	$(NVCC) $(NVCCFLAGS) -o $@ $^ $(LIBS_GPU)
+
+$(SRCDIR)/%_gpu_profile.o: $(SRCDIR)/%.cpp
+	$(NVCC) $(NVCCFLAGS) $(INCLUDES) -DUSE_GPU -c -o $@ $<
+
+$(SRCDIR)/gpu_integrator_gpu_profile.o: $(SRCDIR)/gpu_integrator.cu
+	$(NVCC) $(NVCCFLAGS) $(INCLUDES) -DGW_KERNEL_TIMING -c -o $@ $<
+
 clean:
-	rm -f $(SRCDIR)/*_gsl.o $(SRCDIR)/*_filon.o $(SRCDIR)/*_gpu.o \
-	      bubblemaster bubblemaster_filon bubblemaster_gpu
+	rm -f $(SRCDIR)/*_gsl.o $(SRCDIR)/*_filon.o $(SRCDIR)/*_gpu.o $(SRCDIR)/*_gpu_profile.o \
+	      bubblemaster bubblemaster_filon bubblemaster_gpu bubblemaster_gpu_profile
