@@ -73,8 +73,14 @@ private:
     int n_floor_     = 0;   // resolved each Compute()
 
     // Device arrays (allocated in constructor, freed in destructor)
-    double *d_phi_    = nullptr;   // [n_s * n_z]
-    double *d_phi2_   = nullptr;   // [n_s * n_z]
+    // Layout: [iz * n_s + is] (transposed relative to the natural [is][iz]
+    // input), so consecutive threads (consecutive i_s -- the fastest-varying
+    // index in gw_kernel) read consecutive memory for a fixed iz. Coalesced,
+    // unlike [is * n_z + iz] where consecutive threads would be n_z elements
+    // apart -- see gw_kernel's z-integral loops and GpuIntegrator's flatten
+    // code / build_phi2.
+    double *d_phi_    = nullptr;   // [n_z * n_s]
+    double *d_phi2_   = nullptr;   // [n_z * n_s]
     double *d_z_      = nullptr;   // [n_z]
     double *d_w_      = nullptr;   // [n_w]
     double *d_k_      = nullptr;   // [n_k]

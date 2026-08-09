@@ -406,12 +406,16 @@ __global__ void gw_kernel(
                         xx2, xi2, yy2, yi2, xz2, xzi2);
 
     // --- z-integrals ---
+    // phi/phi2 layout is [iz * n_s + is] (transposed vs. the natural
+    // [is][iz]) so that consecutive threads (consecutive i_s) hit
+    // consecutive memory for a fixed iz -- coalesced. See d_phi_'s
+    // declaration in the header for why.
     double iz1_zz = 0., iz2_zz = 0.;
     for (int iz = 1; iz < n_z; ++iz) {
         double zm   = z_arr[iz] - dz * 0.5;
         double czm  = cos(w * k * zm);
-        double q1   = (phi [i_s*n_z + iz] - phi [i_s*n_z + iz-1]) / dz;
-        double q2   = (phi2[i_s*n_z + iz] - phi2[i_s*n_z + iz-1]) / dz;
+        double q1   = (phi [iz*n_s + i_s] - phi [(iz-1)*n_s + i_s]) / dz;
+        double q2   = (phi2[iz*n_s + i_s] - phi2[(iz-1)*n_s + i_s]) / dz;
         iz1_zz += dz * 2.0 * czm * q1 * q1;
         iz2_zz += dz * 2.0 * czm * q2 * q2;
     }
@@ -420,8 +424,8 @@ __global__ void gw_kernel(
     for (int iz = 0; iz < n_z; ++iz) {
         double fz  = (iz == 0 || iz == n_z-1) ? 0.5 : 1.0;
         double cz  = cos(w * k * z_arr[iz]);
-        double q1  = (phi [i_s*n_z + iz] - phi [(i_s-1)*n_z + iz]) / ds;
-        double q2  = (phi2[i_s*n_z + iz] - phi2[(i_s-1)*n_z + iz]) / ds;
+        double q1  = (phi [iz*n_s + i_s] - phi [iz*n_s + (i_s-1)]) / ds;
+        double q2  = (phi2[iz*n_s + i_s] - phi2[iz*n_s + (i_s-1)]) / ds;
         iz1_xa += fz * dz * 2.0 * cz * q1 * q1;
         iz2_xa += fz * dz * 2.0 * cz * q2 * q2;
     }
@@ -429,14 +433,14 @@ __global__ void gw_kernel(
     double iz1_xz = 0., iz2_xz = 0.;
     for (int iz = 1; iz < n_z; ++iz) {
         double szm  = sin(w * k * (z_arr[iz] - dz * 0.5));
-        double ds1  = 0.5/ds * (phi [i_s*n_z+iz]   - phi [(i_s-1)*n_z+iz]
-                               + phi [i_s*n_z+iz-1] - phi [(i_s-1)*n_z+iz-1]);
-        double dz1  = 0.5/dz * (phi [i_s*n_z+iz]   - phi [i_s*n_z+iz-1]
-                               + phi [(i_s-1)*n_z+iz] - phi [(i_s-1)*n_z+iz-1]);
-        double ds2  = 0.5/ds * (phi2[i_s*n_z+iz]   - phi2[(i_s-1)*n_z+iz]
-                               + phi2[i_s*n_z+iz-1] - phi2[(i_s-1)*n_z+iz-1]);
-        double dz2  = 0.5/dz * (phi2[i_s*n_z+iz]   - phi2[i_s*n_z+iz-1]
-                               + phi2[(i_s-1)*n_z+iz] - phi2[(i_s-1)*n_z+iz-1]);
+        double ds1  = 0.5/ds * (phi [iz*n_s+i_s]     - phi [iz*n_s+(i_s-1)]
+                               + phi [(iz-1)*n_s+i_s] - phi [(iz-1)*n_s+(i_s-1)]);
+        double dz1  = 0.5/dz * (phi [iz*n_s+i_s]     - phi [(iz-1)*n_s+i_s]
+                               + phi [iz*n_s+(i_s-1)] - phi [(iz-1)*n_s+(i_s-1)]);
+        double ds2  = 0.5/ds * (phi2[iz*n_s+i_s]     - phi2[iz*n_s+(i_s-1)]
+                               + phi2[(iz-1)*n_s+i_s] - phi2[(iz-1)*n_s+(i_s-1)]);
+        double dz2  = 0.5/dz * (phi2[iz*n_s+i_s]     - phi2[(iz-1)*n_s+i_s]
+                               + phi2[iz*n_s+(i_s-1)] - phi2[(iz-1)*n_s+(i_s-1)]);
         iz1_xz += dz * 2.0 * szm * ds1 * dz1;
         iz2_xz += dz * 2.0 * szm * ds2 * dz2;
     }
@@ -485,11 +489,12 @@ GpuIntegrator::GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
               << " n_s=" << n_s_ << " n_z=" << n_z_
               << "\n  intbuf=" << (n_w_*n_k_*n_s_*6*8)/(1<<20) << " MB\n\n";
 
-    // --- Flatten phi to host 1-D array ---
+    // --- Flatten phi to host 1-D array, transposed to [iz * n_s + is] (see
+    // d_phi_'s declaration in the header for why) ---
     std::vector<double> phi_host(n_s_ * n_z_);
     for (std::size_t is = 0; is < n_s_; ++is)
         for (std::size_t iz = 0; iz < n_z_; ++iz)
-            phi_host[is * n_z_ + iz] = input_phi[is][iz];
+            phi_host[iz * n_s_ + is] = input_phi[is][iz];
 
     // --- Build phi2 on host ---
     std::vector<double> phi2_host;
@@ -683,6 +688,7 @@ void GpuIntegrator::build_phi2(const std::vector<std::vector<double>> &input_phi
                                  input_phi[0].end());
     Interpolator phi0_interp(z_new, phi0_new);
 
+    // Transposed to [iz * n_s + is] to match d_phi_'s layout (see header).
     phi2_host.resize(n_s_ * n_z_);
     for (std::size_t is = 0; is < n_s_; ++is) {
         double s_val = is * ds_;
@@ -690,7 +696,7 @@ void GpuIntegrator::build_phi2(const std::vector<std::vector<double>> &input_phi
             double z_val = iz * dz_;
             double r1 = std::sqrt(s_val*s_val + (z_val - d_/2.)*(z_val - d_/2.));
             double r2 = std::sqrt(s_val*s_val + (z_val + d_/2.)*(z_val + d_/2.));
-            phi2_host[is * n_z_ + iz] = phi0_interp(r1) + phi0_interp(r2);
+            phi2_host[iz * n_s_ + is] = phi0_interp(r1) + phi0_interp(r2);
         }
     }
 }
