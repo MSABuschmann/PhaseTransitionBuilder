@@ -6,7 +6,7 @@ import sys
 
 t_max = float(sys.argv[1]) if len(sys.argv) > 1 else 10.0
 threshold = 0.01
-N_THETA, N_PHI = 8, 12  # small, deliberately different resolution knobs than production
+N_THETA, N_PHI = 64, 128  # production resolution
 
 # ---- load scan_cache.h5 ----
 gammas_grid, times_by_g, w_by_g, k_by_g, amp_re, amp_im = [], [], [], [], [], []

@@ -167,10 +167,15 @@ std::vector<double> compute_coherent_spectrum(
 
             for (int p = 0; p < n_active; ++p) {
                 double cth = std::clamp(std::abs(quad.khat[d].dot(geo.axis[active[p]])), 0.0, 1.0);
-                double pos = cth * (n_k - 1);
-                int lo = std::clamp(static_cast<int>(std::floor(pos)), 0, n_k - 2);
+                // Bracket-search rather than assuming amp.k is exactly
+                // uniform (linspace(0,1,n_k)) -- matches the gamma/time
+                // lookups elsewhere and removes any risk from real k grids
+                // not being bit-exactly uniform. Identical result to the
+                // O(1) formula for a genuinely uniform grid, just safer.
+                int lo; double frac;
+                find_bracket(amp.k, cth, lo, frac);
                 kidx[p]  = lo;
-                kfrac[p] = pos - lo;
+                kfrac[p] = frac;
             }
             for (int p = 0; p < n_active; ++p) {
                 double proj = quad.khat[d].dot(geo.center[active[p]]);
