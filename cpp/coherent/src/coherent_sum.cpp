@@ -70,6 +70,7 @@ void build_amp_diff_for_pair(const AmplitudeTable &amp, const WeightsData &wd,
                               std::vector<double> &dA_re, std::vector<double> &dA_im,
                               int p, int n_active, int n_diff, int n_w, int n_k) {
     (void)n_active;
+    (void)c1;
     int g_lo; double g_frac;
     find_bracket(amp.gamma_grid, gamma_p, g_lo, g_frac);
 

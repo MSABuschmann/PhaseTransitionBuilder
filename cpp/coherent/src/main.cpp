@@ -98,6 +98,11 @@ int main(int argc, char *argv[]) {
               << n_theta << " x " << n_phi << ")\n";
 
     if (debug_pair >= 0) {
+        std::cout.precision(17);
+        std::cout << "[debug] axis=(" << geo.axis[debug_pair].x() << ", " << geo.axis[debug_pair].y()
+                  << ", " << geo.axis[debug_pair].z() << ")\n";
+        std::cout << "[debug] center=(" << geo.center[debug_pair].x() << ", " << geo.center[debug_pair].y()
+                  << ", " << geo.center[debug_pair].z() << ")\n";
         debug_dump_pair(amp, wd, debug_pair, t_max_values[0]);
     }
 

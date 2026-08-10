@@ -24,7 +24,15 @@ else
   # GSL variant already makes).
 endif
 
-CXXFLAGS = -std=c++17 -O3 -fopenmp -ffast-math -Wall -Wextra -Wno-sign-compare $(OMP_FLAGS)
+# No -ffast-math here (unlike the other cpp/ binaries): the phase
+# computation does cos(w*proj)/sin(w*proj) with arguments that can reach
+# into the thousands (w up to ~14, |proj| up to a few hundred), and
+# -ffast-math can substitute a faster/lower-accuracy vectorized trig
+# implementation there -- compiler/libm/hardware dependent, so something
+# that's harmless on one toolchain can be a real several-percent error on
+# another. This binary's hot loop is otherwise just interpolation
+# arithmetic, which doesn't need -ffast-math's other optimizations.
+CXXFLAGS = -std=c++17 -O3 -fopenmp -Wall -Wextra -Wno-sign-compare $(OMP_FLAGS)
 
 INCLUDES = -I../../common \
            -I$(HDF5_INCLUDE) \
