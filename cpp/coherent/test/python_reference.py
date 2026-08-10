@@ -22,11 +22,30 @@ with h5py.File('scan_cache.h5') as f:
         amp_im.append(grp['amp_im'][:])
 gammas_grid = np.array(gammas_grid)
 scan_times = times_by_g[0]
-w_amp = w_by_g[0]
+w_amp = w_by_g[0]   # resampling target: smallest gamma's own w grid
 k_amp = k_by_g[0]
-amp_re = np.array(amp_re)  # (Ng, Nt, n_w, n_k)
-amp_im = np.array(amp_im)
-Ng, Nt, n_w, n_k = amp_re.shape
+Ng = len(gammas_grid)
+Nt, n_w_native, n_k = amp_re[0].shape
+n_w = len(w_amp)
+
+# w is gamma-dependent (wmin shrinks with gamma via BubbleMaster's spatial
+# grid) -- resample every gamma's amp_re/amp_im onto w_amp before stacking,
+# same fix as amplitude_table.cpp / notebook 06's build_amp_interpolator.
+amp_re_resampled = np.zeros((Ng, Nt, n_w, n_k))
+amp_im_resampled = np.zeros((Ng, Nt, n_w, n_k))
+for ig in range(Ng):
+    if np.array_equal(w_by_g[ig], w_amp):
+        amp_re_resampled[ig] = amp_re[ig]
+        amp_im_resampled[ig] = amp_im[ig]
+    else:
+        for it in range(Nt):
+            for ik in range(n_k):
+                amp_re_resampled[ig, it, :, ik] = np.interp(
+                    w_amp, w_by_g[ig], amp_re[ig][it, :, ik], left=0., right=0.)
+                amp_im_resampled[ig, it, :, ik] = np.interp(
+                    w_amp, w_by_g[ig], amp_im[ig][it, :, ik], left=0., right=0.)
+amp_re = amp_re_resampled
+amp_im = amp_im_resampled
 
 flat_shape = (Ng, Nt, n_w * n_k)
 _raw_re = RegularGridInterpolator((gammas_grid, scan_times), amp_re.reshape(flat_shape),

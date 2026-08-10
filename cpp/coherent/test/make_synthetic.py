@@ -7,18 +7,39 @@ rng = np.random.default_rng(42)
 Ng, Nt, n_w, n_k = 5, 6, 4, 7
 gammas = np.linspace(1.0, 8.0, Ng)
 times  = np.linspace(1.0, 20.0, Nt)
-w      = np.linspace(0.5, 3.0, n_w)
 k      = np.linspace(0.0, 1.0, n_k)
 
-amp_re_all = rng.normal(size=(Ng, Nt, n_w, n_k))
-amp_im_all = rng.normal(size=(Ng, Nt, n_w, n_k))
+# w grid is gamma-dependent, matching real BubbleMaster scans: wmin shrinks
+# with gamma (via the spatial grid, see ptbuilder/ic.py's write_2d_setup),
+# wmax stays fixed. amp_re/amp_im are generated as smooth functions of w so
+# that resampling onto a different gamma's w grid is well-defined/testable
+# (not just noise, so a resampling bug shows up as a real numeric mismatch).
+wmax = 3.0
+w_by_gamma = [np.geomspace(0.5 / g, wmax, n_w) for g in gammas]
+
+def amp_fn(w, t, k, g):
+    # arbitrary smooth function of (w, t, k, g) for testing
+    return (np.sin(w[:, None] * t + g) * np.cos(3 * k[None, :])
+            + 0.1 * w[:, None] * k[None, :])
+
+amp_re_all = []
+amp_im_all = []
+for ig, g in enumerate(gammas):
+    w_g = w_by_gamma[ig]
+    re_g = np.zeros((Nt, n_w, n_k))
+    im_g = np.zeros((Nt, n_w, n_k))
+    for it, t in enumerate(times):
+        re_g[it] = amp_fn(w_g, t, k, g)
+        im_g[it] = amp_fn(w_g, t, k, g) * 0.5 + 0.05 * np.outer(w_g, k)
+    amp_re_all.append(re_g)
+    amp_im_all.append(im_g)
 
 with h5py.File('scan_cache.h5', 'w') as f:
     for ig, g in enumerate(gammas):
         grp = f.create_group(str(g))
         grp.attrs['gamma'] = g
         grp.create_dataset('times', data=times)
-        grp.create_dataset('w', data=w)
+        grp.create_dataset('w', data=w_by_gamma[ig])
         grp.create_dataset('spectrum', data=np.zeros((Nt, n_w)))
         grp.create_dataset('dEdt', data=np.zeros((Nt, n_w)))
         grp.create_dataset('k', data=k)
