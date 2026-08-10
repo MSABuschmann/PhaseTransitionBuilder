@@ -44,12 +44,19 @@ class ScanResult:
                 = E(<= times[i])  in BubbleMaster units
     dEdt      : instantaneous rate  (n_t, n_w)
                 = finite-difference derivative of spectrum w.r.t. time
+    k         : cos(theta) grid (n_k,), or None if this run didn't save
+                amplitude (i.e. was run without --save-amplitude)
+    amp_re    : Re A(w, cos_theta) at each time, (n_t, n_w, n_k), or None
+    amp_im    : Im A(w, cos_theta) at each time, (n_t, n_w, n_k), or None
     """
     gamma:    float
     times:    np.ndarray
     w:        np.ndarray
     spectrum: np.ndarray   # (n_t, n_w)
     dEdt:     np.ndarray   # (n_t, n_w)
+    k:        Optional[np.ndarray] = None   # (n_k,)
+    amp_re:   Optional[np.ndarray] = None   # (n_t, n_w, n_k)
+    amp_im:   Optional[np.ndarray] = None   # (n_t, n_w, n_k)
 
     def to_hdf5(self, group: h5py.Group):
         group.attrs["gamma"] = self.gamma
@@ -57,15 +64,23 @@ class ScanResult:
         group.create_dataset("w",        data=self.w)
         group.create_dataset("spectrum", data=self.spectrum)
         group.create_dataset("dEdt",     data=self.dEdt)
+        if self.amp_re is not None:
+            group.create_dataset("k",      data=self.k)
+            group.create_dataset("amp_re", data=self.amp_re)
+            group.create_dataset("amp_im", data=self.amp_im)
 
     @classmethod
     def from_hdf5(cls, group: h5py.Group) -> "ScanResult":
+        has_amp = "amp_re" in group
         return cls(
             gamma    = float(group.attrs["gamma"]),
             times    = group["times"][:],
             w        = group["w"][:],
             spectrum = group["spectrum"][:],
             dEdt     = group["dEdt"][:],
+            k        = group["k"][:]      if has_amp else None,
+            amp_re   = group["amp_re"][:] if has_amp else None,
+            amp_im   = group["amp_im"][:] if has_amp else None,
         )
 
 
@@ -74,7 +89,7 @@ class ScanResult:
 # ---------------------------------------------------------------------------
 
 def run_scan(model, scan_config: ScanConfig, config=None,
-             force: bool = False) -> Dict[float, ScanResult]:
+             force: bool = False, save_amplitude: bool = False) -> Dict[float, ScanResult]:
     """
     Run or load a full (gamma, time) scan for `model`.
 
@@ -82,6 +97,11 @@ def run_scan(model, scan_config: ScanConfig, config=None,
       - Check whether a cached result exists in model.results_dir/scan.h5
       - If not (or if force=True), write a BubbleMaster setup, run the binary,
         read results, compute dEdt, and save to cache.
+
+    save_amplitude : if True, pass --save-amplitude to bubblemaster so each
+        run also stores Re/Im A(w, cos_theta); ScanResult.amp_re/amp_im/k
+        get populated (and scan_cache.h5 grows accordingly -- angle-resolved
+        amplitude is ~n_k times larger than the angle-integrated spectrum).
 
     Returns a dict mapping γ → ScanResult.
     """
@@ -117,7 +137,7 @@ def run_scan(model, scan_config: ScanConfig, config=None,
         )
 
         # Run bubblemaster
-        run_bubblemaster(setup_path, output_dir, cfg)
+        run_bubblemaster(setup_path, output_dir, cfg, save_amplitude=save_amplitude)
 
         # Read results
         result = _read_bubblemaster_output(output_dir, gamma, scan_config.times)
@@ -159,7 +179,10 @@ def _read_bubblemaster_output(output_dir: Path, gamma: float,
 
     Expected layout in output_dir:
       result_0000.h5, result_0001.h5, ...
-    Each file has datasets "w" [n_w] and "spectrum" [n_w].
+    Each file has datasets "w" [n_w] and "spectrum" [n_w]; if the run used
+    --save-amplitude, also "k" [n_k], "amp_re" [n_w, n_k], "amp_im" [n_w, n_k]
+    -- auto-detected here (no separate flag needed) and stacked into
+    ScanResult.amp_re/amp_im if present.
     """
     output_dir = Path(output_dir)
     result_files = sorted(output_dir.glob("result_*.h5"),
@@ -171,12 +194,30 @@ def _read_bubblemaster_output(output_dir: Path, gamma: float,
             "Did bubblemaster run successfully?"
         )
 
-    spectra = []
+    spectra  = []
+    amp_res  = []
+    amp_ims  = []
     w = None
+    k = None
+    has_amp = None
     for fpath in result_files:
         with h5py.File(fpath, "r") as f:
             w_i    = f["w"][:]
             spec_i = f["spectrum"][:]
+            file_has_amp = "amp_re" in f
+            if has_amp is None:
+                has_amp = file_has_amp
+            elif file_has_amp != has_amp:
+                raise ValueError(
+                    f"{fpath} has inconsistent amplitude data vs. earlier "
+                    f"result files in {output_dir} -- was --save-amplitude "
+                    f"used for only part of this run?"
+                )
+            if has_amp:
+                if k is None:
+                    k = f["k"][:]
+                amp_res.append(f["amp_re"][:])
+                amp_ims.append(f["amp_im"][:])
         if w is None:
             w = w_i
         spectra.append(spec_i)
@@ -197,6 +238,9 @@ def _read_bubblemaster_output(output_dir: Path, gamma: float,
         w        = w,
         spectrum = spectrum,
         dEdt     = dEdt,
+        k        = k               if has_amp else None,
+        amp_re   = np.array(amp_res) if has_amp else None,   # (n_t, n_w, n_k)
+        amp_im   = np.array(amp_ims) if has_amp else None,   # (n_t, n_w, n_k)
     )
 
 
