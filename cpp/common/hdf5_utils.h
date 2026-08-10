@@ -114,3 +114,34 @@ inline void write_2d_flat(Loc &loc, const std::string &name,
     auto ds = loc.createDataSet(name, H5::PredType::NATIVE_DOUBLE, space);
     ds.write(flat.data(), H5::PredType::NATIVE_DOUBLE);
 }
+
+// ---------------------------------------------------------------------------
+// N-D dataset reader (row-major flat buffer + dims)
+// ---------------------------------------------------------------------------
+
+template <typename Loc>
+inline std::vector<double> read_ndarray(const Loc &loc, const std::string &name,
+                                         std::vector<hsize_t> &dims_out) {
+    H5::DataSet   ds    = loc.openDataSet(name);
+    H5::DataSpace space = ds.getSpace();
+    int rank = space.getSimpleExtentNdims();
+    dims_out.resize(rank);
+    space.getSimpleExtentDims(dims_out.data());
+    hsize_t n = 1;
+    for (auto d : dims_out) n *= d;
+    std::vector<double> data(n);
+    ds.read(data.data(), H5::PredType::NATIVE_DOUBLE);
+    return data;
+}
+
+// ---------------------------------------------------------------------------
+// Top-level group name listing (e.g. scan_cache.h5's gamma-keyed groups)
+// ---------------------------------------------------------------------------
+
+inline std::vector<std::string> list_group_names(const H5::H5File &file) {
+    std::vector<std::string> names;
+    hsize_t n = file.getNumObjs();
+    for (hsize_t i = 0; i < n; ++i)
+        names.push_back(file.getObjnameByIdx(i));
+    return names;
+}

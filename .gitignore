@@ -37,6 +37,7 @@ download/
 # C++ compiled binaries (object files covered above)
 cpp/weights/weights
 cpp/bubblemaster/bubblemaster
+cpp/coherent/coherent
 
 # Generated scripts and logs
 scripts/

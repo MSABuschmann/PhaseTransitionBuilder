@@ -13,6 +13,7 @@ class Config:
     bubblemaster_gpu_bin: Path    = _REPO_ROOT / "bin/bubblemaster_gpu"
     solver_1d_bin: Path           = _REPO_ROOT / "bin/solver_1d"
     weights_bin: Path             = _REPO_ROOT / "bin/weights"
+    coherent_bin: Path            = _REPO_ROOT / "bin/coherent"
     pysledgehamr_path: Path       = _SLEDGEHAMR_DEFAULT
 
     def __post_init__(self):
@@ -22,6 +23,7 @@ class Config:
         self.bubblemaster_gpu_bin   = Path(self.bubblemaster_gpu_bin)
         self.solver_1d_bin          = Path(self.solver_1d_bin)
         self.weights_bin            = Path(self.weights_bin)
+        self.coherent_bin           = Path(self.coherent_bin)
         self.pysledgehamr_path      = Path(self.pysledgehamr_path)
 
     def check_binaries(self):
