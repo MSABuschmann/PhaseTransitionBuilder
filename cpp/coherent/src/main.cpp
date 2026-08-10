@@ -98,6 +98,10 @@ int main(int argc, char *argv[]) {
 
     for (double t_max : t_max_values) {
         auto active = active_pairs_for(wd, t_max, threshold);
+        for (int p : active) {
+            std::cout << "  active pair idx=" << p << "  gamma=" << wd.gamma[p]
+                      << "  pair_i=" << wd.pair_i[p] << "  pair_j=" << wd.pair_j[p] << "\n";
+        }
         std::cout << "t_max=" << t_max << ": " << active.size() << "/" << wd.n_pairs
                   << " pairs active\n";
 
