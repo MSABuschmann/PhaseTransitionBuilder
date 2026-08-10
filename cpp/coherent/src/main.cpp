@@ -19,7 +19,8 @@ void print_usage(const char *prog) {
         << "       [--threshold X]     (default 0.01)\n"
         << "       [--n-theta N]       (default 64)\n"
         << "       [--n-phi N]         (default 128)\n"
-        << "       [--t-chunk N]       (default 32)\n";
+        << "       [--t-chunk N]       (default 32)\n"
+        << "       [--debug-pair IDX]  (dump intermediate amplitude values for one pair)\n";
 }
 
 } // namespace
@@ -40,6 +41,7 @@ int main(int argc, char *argv[]) {
     std::vector<double> t_max_values;
     double threshold = 0.01;
     int n_theta = 64, n_phi = 128, t_chunk = 32;
+    int debug_pair = -1;
 
     for (int i = 5; i < argc; ++i) {
         std::string arg = argv[i];
@@ -60,6 +62,8 @@ int main(int argc, char *argv[]) {
             n_phi = static_cast<int>(next_double("--n-phi"));
         } else if (arg == "--t-chunk") {
             t_chunk = static_cast<int>(next_double("--t-chunk"));
+        } else if (arg == "--debug-pair") {
+            debug_pair = static_cast<int>(next_double("--debug-pair"));
         } else {
             std::cerr << "Unknown argument: " << arg << "\n";
             print_usage(argv[0]);
@@ -92,6 +96,10 @@ int main(int argc, char *argv[]) {
     SphereQuadrature quad = build_sphere_quadrature(n_theta, n_phi);
     std::cout << "Sphere quadrature: " << quad.n_sph << " points ("
               << n_theta << " x " << n_phi << ")\n";
+
+    if (debug_pair >= 0) {
+        debug_dump_pair(amp, wd, debug_pair, t_max_values[0]);
+    }
 
     std::vector<int> n_active_per_tmax;
     std::vector<std::vector<double>> P_coh_per_tmax;

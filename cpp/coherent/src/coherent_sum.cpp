@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <omp.h>
 
 namespace {
@@ -112,6 +113,59 @@ std::vector<int> active_pairs_for(const WeightsData &wd, double t_max, double th
         if (any_active) active.push_back(p);
     }
     return active;
+}
+
+void debug_dump_pair(const AmplitudeTable &amp, const WeightsData &wd,
+                      int pair_idx, double t_max) {
+    double gamma_p = std::clamp(wd.gamma[pair_idx], amp.gamma_grid.front(), amp.gamma_grid.back());
+
+    double t_hi = std::min(t_max, amp.t_grid.back());
+    std::vector<double> t_fine;
+    for (double x : wd.t)
+        if (x >= amp.t_grid.front() && x <= t_hi) t_fine.push_back(x);
+    if (t_fine.empty() || t_fine.back() < t_hi) t_fine.push_back(t_hi);
+
+    std::cout.precision(17);
+    std::cout << "[debug] pair_idx=" << pair_idx << "  raw_gamma=" << wd.gamma[pair_idx]
+              << "  clipped_gamma=" << gamma_p << "\n";
+    std::cout << "[debug] t_fine: n=" << t_fine.size() << "  first=" << t_fine.front()
+              << "  second=" << t_fine[1] << "  last=" << t_fine.back() << "\n";
+
+    int g_lo; double g_frac;
+    find_bracket(amp.gamma_grid, gamma_p, g_lo, g_frac);
+    std::cout << "[debug] gamma bracket: g_lo=" << g_lo << " (" << amp.gamma_grid[g_lo]
+              << ")  g_hi=" << g_lo + 1 << " (" << amp.gamma_grid[g_lo + 1]
+              << ")  g_frac=" << g_frac << "\n";
+
+    std::vector<double> re0(amp.n_w * amp.n_k), im0(amp.n_w * amp.n_k);
+    std::vector<double> re1(amp.n_w * amp.n_k), im1(amp.n_w * amp.n_k);
+    int t_lo; double t_frac;
+    find_bracket(amp.t_grid, t_fine.front(), t_lo, t_frac);
+    std::cout << "[debug] t bracket @t_fine[0]: t_lo=" << t_lo << " (" << amp.t_grid[t_lo]
+              << ")  t_hi=" << t_lo + 1 << " (" << amp.t_grid[t_lo + 1]
+              << ")  t_frac=" << t_frac << "\n";
+    bilinear_amp_slice(amp, g_lo, g_frac, t_lo, t_frac, re0, im0);
+
+    find_bracket(amp.t_grid, t_fine.back(), t_lo, t_frac);
+    std::cout << "[debug] t bracket @t_fine[-1]: t_lo=" << t_lo << " (" << amp.t_grid[t_lo]
+              << ")  t_hi=" << t_lo + 1 << " (" << amp.t_grid[t_lo + 1]
+              << ")  t_frac=" << t_frac << "\n";
+    bilinear_amp_slice(amp, g_lo, g_frac, t_lo, t_frac, re1, im1);
+
+    std::cout << "[debug] amp_re[iw=0, k=0..4] @t_fine[0]: ";
+    for (int ik = 0; ik < std::min(5, amp.n_k); ++ik) std::cout << re0[ik] << " ";
+    std::cout << "\n[debug] amp_im[iw=0, k=0..4] @t_fine[0]: ";
+    for (int ik = 0; ik < std::min(5, amp.n_k); ++ik) std::cout << im0[ik] << " ";
+    std::cout << "\n[debug] amp_re[iw=0, k=0..4] @t_fine[-1]: ";
+    for (int ik = 0; ik < std::min(5, amp.n_k); ++ik) std::cout << re1[ik] << " ";
+    std::cout << "\n[debug] amp_im[iw=0, k=0..4] @t_fine[-1]: ";
+    for (int ik = 0; ik < std::min(5, amp.n_k); ++ik) std::cout << im1[ik] << " ";
+    std::cout << "\n";
+
+    const double *pair_weights = &wd.weights[static_cast<size_t>(pair_idx) * wd.n_t];
+    std::vector<double> weight_row(pair_weights, pair_weights + wd.n_t);
+    double wgt0 = lerp1d(t_fine.front(), wd.t, weight_row);
+    std::cout << "[debug] weight @t_fine[0]=" << wgt0 << "\n";
 }
 
 std::vector<double> compute_coherent_spectrum(

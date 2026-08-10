@@ -18,3 +18,11 @@ std::vector<double> compute_coherent_spectrum(
     double t_max, const WeightsData &wd, const AmplitudeTable &amp,
     const PairGeometry &geo, const SphereQuadrature &quad,
     int t_chunk, double threshold = 0.01);
+
+// Debugging aid: prints the raw bilinearly-interpolated amplitude at the
+// fine time grid's first/last points for one pair, plus the weight at the
+// first point -- for cross-checking against the same quantities computed
+// directly in the notebook (amp_interp_fn(np.array([[g, t]])) at the same
+// (gamma, t)).
+void debug_dump_pair(const AmplitudeTable &amp, const WeightsData &wd,
+                      int pair_idx, double t_max);
