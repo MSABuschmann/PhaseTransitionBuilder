@@ -48,7 +48,7 @@ uses different paths (e.g. module-loaded HDF5).
 
 ## Usage
 
-Work through the notebooks in order:
+The main reconstruction workflow is:
 
 | Notebook | Description |
 |---|---|
@@ -56,6 +56,13 @@ Work through the notebooks in order:
 | `notebooks/01_scan.ipynb` | Run the 2D BubbleMaster scan over γ |
 | `notebooks/02_realisation.ipynb` | Generate bubble population and bootstrap GW spectrum |
 | `notebooks/03_validate_3d.ipynb` | Compare bootstrap against a sledgehamr 3D run |
+| `notebooks/05_n3_reconstruction.ipynb` | Validate the reconstruction with three bubbles |
+| `notebooks/06_n64_reconstruction.ipynb` | Compare the reconstructed and 3+1D N=64 spectra |
+
+The remaining notebooks contain targeted solver and field-validation checks.
+On a SLURM cluster, the scan and reconstruction notebooks only prepare inputs
+and submission scripts in `scripts/`; submit the printed `sbatch` command and
+continue the notebook after the job completes.
 
 ## Configuration
 
