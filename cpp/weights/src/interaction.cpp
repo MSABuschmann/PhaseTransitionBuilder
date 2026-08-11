@@ -14,6 +14,13 @@ static double plane_dist(const Eigen::Vector3d &nxhat,
     return nxhat.dot(c - cx);
 }
 
+static Eigen::Vector3d minimum_image(const Eigen::Vector3d &delta, double L) {
+    Eigen::Vector3d out = delta;
+    for (int k = 0; k < 3; ++k)
+        out[k] -= L * std::round(out[k] / L);
+    return out;
+}
+
 static void other_circle(const Eigen::Vector3d &c2, double R2,
                           const Eigen::Vector3d &nxhat,
                           const Eigen::Vector3d &cx,
@@ -104,7 +111,11 @@ void ComputePairWeight(size_t test, size_t other,
     weight.assign(n_t, 0.);
 
     const Eigen::Vector3d &c0 = setup.pos[test];
-    const Eigen::Vector3d &c1 = setup.pos[other];
+    // Work in an unwrapped local frame: c1 is the nearest periodic image of
+    // `other` relative to c0.  The original implementation achieved the same
+    // thing by explicitly creating 27 ghost copies of every bubble.
+    const Eigen::Vector3d c1 =
+        c0 + minimum_image(setup.pos[other] - c0, setup.L);
     Eigen::Vector3d nxhat = (c1 - c0).normalized();
 
     // Build a frame (u, v) perpendicular to nxhat
@@ -116,7 +127,6 @@ void ComputePairWeight(size_t test, size_t other,
 
     // Find first collision time index
     int i_tcol  = -1;
-    bool inside = false;
     std::vector<Eigen::Vector3d> cx(n_t);
     std::vector<double>          Rx(n_t, 0.);
 
@@ -127,10 +137,6 @@ void ComputePairWeight(size_t test, size_t other,
 
         if (R0 + R1 >= d && i_tcol < 0) {
             i_tcol = i_t;
-            inside = cx[i_t](0) >= 0. && cx[i_t](0) < setup.L &&
-                     cx[i_t](1) >= 0. && cx[i_t](1) < setup.L &&
-                     cx[i_t](2) >= 0. && cx[i_t](2) < setup.L;
-            if (!inside) break;
         }
         if (R0 + R1 >= d) {
             double tmp = d*d - R1*R1 + R0*R0;
@@ -138,7 +144,9 @@ void ComputePairWeight(size_t test, size_t other,
         }
     }
 
-    if (!inside || i_tcol < 0) return;
+    // In a periodic box an unwrapped collision centre need not lie in the
+    // principal [0,L)^3 cell.  It is nevertheless a physical collision.
+    if (i_tcol < 0) return;
 
     for (int i_t = i_tcol; i_t < n_t; ++i_t) {
         std::vector<std::pair<double,double>> sections;
@@ -147,15 +155,33 @@ void ComputePairWeight(size_t test, size_t other,
         for (int b = 0; b < setup.n_b; ++b) {
             if (b == static_cast<int>(test) || b == static_cast<int>(other))
                 continue;
-            Eigen::Vector3d dist = setup.pos[b] - cx[i_t];
-            if (dist.squaredNorm() > R2*R2*4) continue;
+            // Include the same 3x3x3 periodic images used by the reference
+            // GetGhosts implementation.  Start around the image nearest to
+            // the collision centre so this remains correct when cx itself is
+            // in an unwrapped neighbouring cell.
+            Eigen::Vector3d c_near = setup.pos[b];
+            for (int k = 0; k < 3; ++k)
+                c_near[k] += setup.L * std::round(
+                    (cx[i_t][k] - c_near[k]) / setup.L);
 
-            Eigen::Vector3d cs; double Rs;
-            other_circle(setup.pos[b], R2, nxhat, cx[i_t], cs, Rs);
-            double t0, t1;
-            get_cut_range(cs, Rs, cx[i_t], Rx[i_t], u, v, t0, t1);
-            if (!std::isnan(t0) && !std::isnan(t1) && t0 != t1)
-                sections.push_back({t0, t1});
+            for (int sx = -1; sx <= 1; ++sx) {
+                for (int sy = -1; sy <= 1; ++sy) {
+                    for (int sz = -1; sz <= 1; ++sz) {
+                        Eigen::Vector3d c2 = c_near + setup.L *
+                            Eigen::Vector3d(sx, sy, sz);
+                        Eigen::Vector3d dist = c2 - cx[i_t];
+                        if (dist.squaredNorm() > R2*R2*4) continue;
+
+                        Eigen::Vector3d cs; double Rs;
+                        other_circle(c2, R2, nxhat, cx[i_t], cs, Rs);
+                        double t0, t1;
+                        get_cut_range(cs, Rs, cx[i_t], Rx[i_t], u, v,
+                                      t0, t1);
+                        if (!std::isnan(t0) && !std::isnan(t1) && t0 != t1)
+                            sections.push_back({t0, t1});
+                    }
+                }
+            }
         }
 
         if (sections.empty()) {

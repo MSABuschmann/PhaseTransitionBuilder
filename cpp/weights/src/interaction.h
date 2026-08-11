@@ -13,6 +13,7 @@ struct WeightsSetup {
 };
 
 // Compute arc-length weight for a colliding pair (test, other) at each time.
+// Pair geometry and occlusion use periodic images in the box of side L.
 // weight[i_t] = fraction of collision-circle arc NOT blocked by other bubbles.
 void ComputePairWeight(size_t test, size_t other,
                        const WeightsSetup &setup,
