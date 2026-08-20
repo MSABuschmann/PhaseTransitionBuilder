@@ -25,7 +25,12 @@ class BubbleMasterParams:
     ratio and is made equal to the requested gamma at that contact time.
     """
     # resolution
-    dz:           float = 0.005
+    # Choose exactly one spatial-resolution convention.  ``wall_points``
+    # resolves the Lorentz-contracted wall at collision and is therefore the
+    # preferred choice for scans over gamma.  ``dz`` remains available for
+    # reproducing older fixed-grid runs.
+    dz:           Optional[float] = 0.005
+    wall_points:  Optional[int]   = None
     n_w:          int   = 128
     n_k:          int   = 51
     how_often_ds: int   = 5
@@ -133,6 +138,26 @@ def _two_bubble_ic(profile, gamma: float, dz: float,
     return z_comb, phi_comb, d, ds
 
 
+def collision_wall_width(profile, gamma: float) -> float:
+    """Return the outer-minus-inner wall width when its thinning is ``gamma``."""
+    if gamma < 1.0:
+        raise ValueError("gamma must be >= 1")
+    return float((profile.rout_0 - profile.rin_0) / gamma)
+
+
+def _spatial_step(profile, gamma: float, params: BubbleMasterParams) -> float:
+    """Resolve the requested fixed-dz or points-across-wall convention."""
+    if params.wall_points is not None:
+        if params.dz is not None:
+            raise ValueError("set either wall_points or dz, not both")
+        if params.wall_points <= 0:
+            raise ValueError("wall_points must be positive")
+        return collision_wall_width(profile, gamma) / params.wall_points
+    if params.dz is None or params.dz <= 0:
+        raise ValueError("dz must be positive when wall_points is not set")
+    return float(params.dz)
+
+
 def _cutoff_times(d: float, cutoff_type: int, t_0_scal: float,
                   t_min_global: float = 0.0):
     # Match reference: smax=1.2*d, t_cut=0.9*smax, t_0=(smax-t_cut)/4
@@ -168,8 +193,9 @@ def write_2d_setup(model, gamma: float, times: np.ndarray,
     profile = model.instanton
     p       = params
 
+    dz_target = _spatial_step(profile, gamma, p)
     z, phi0, d, ds = _two_bubble_ic(
-        profile, gamma, p.dz, p.collision_radius
+        profile, gamma, dz_target, p.collision_radius
     )
 
     t_min_global       = float(times[-1]) if len(times) > 0 else 0.
@@ -216,6 +242,11 @@ def write_2d_setup(model, gamma: float, times: np.ndarray,
         f.attrs["collision_r0"] = float(
             profile.rmid_0 if p.collision_radius == "mid" else profile.rout_0
         )
+        f.attrs["dz_target"] = float(dz_target)
+        f.attrs["wall_points_target"] = (
+            float(p.wall_points) if p.wall_points is not None else np.nan
+        )
+        f.attrs["collision_wall_width"] = collision_wall_width(profile, gamma)
 
         # Potential group (read by C++ Potential::from_hdf5)
         pot_grp = f.require_group("potential")

@@ -19,7 +19,8 @@ from .physics     import (Potential, Phi4Potential, Phi4PiecewisePotential,
 from .nucleation  import (NucleationRate, UniformNucleation,
                            ExponentialNucleation, FixedNucleation,
                            BubbleEvent, CollisionEvent, BubblePopulation)
-from .ic          import (BubbleMasterParams, write_2d_setup, write_3d_bubbles)
+from .ic          import (BubbleMasterParams, collision_wall_width,
+                          write_2d_setup, write_3d_bubbles)
 from .scan        import (ScanConfig, ScanResult, run_scan, load_scan,
                           load_bm_result)
 from .sim2d       import (run_bubblemaster, run_solver_1d, run_weights)
@@ -41,7 +42,7 @@ __all__ = [
     "NucleationRate", "UniformNucleation", "ExponentialNucleation",
     "FixedNucleation", "BubbleEvent", "CollisionEvent", "BubblePopulation",
     # ic
-    "BubbleMasterParams", "write_2d_setup", "write_3d_bubbles",
+    "BubbleMasterParams", "collision_wall_width", "write_2d_setup", "write_3d_bubbles",
     # scan
     "ScanConfig", "ScanResult", "run_scan", "load_scan", "load_bm_result",
     # sim2d
