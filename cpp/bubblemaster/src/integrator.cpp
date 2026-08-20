@@ -30,7 +30,11 @@ Integrator::Integrator(const std::vector<std::vector<double>> &input_phi,
     n_z_ = z_.size();
     n_s_ = phi_.size();
     slist_ = linspace(0., (n_s_ - 1) * ds_, static_cast<int>(n_s_));
+    auto t_phi2 = std::chrono::steady_clock::now();
     SetPhi2();
+    std::cout << "Timing phase=cpu_reference_field seconds="
+              << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_phi2).count()
+              << "\n";
 
     std::cout << "Integrator: n_z=" << n_z_ << " n_s=" << n_s_
               << " n_w=" << n_w_ << " n_k=" << n_k_
@@ -38,8 +42,13 @@ Integrator::Integrator(const std::vector<std::vector<double>> &input_phi,
               << "  t_cut=" << t_cut_base_ << " t_m=" << t_m_base_
               << " t_max=" << t_max_base_ << "\n\n";
 
+    auto t_precompute = std::chrono::steady_clock::now();
     PrecomputeZIntegrals();
+    std::cout << "Timing phase=cpu_z_precompute seconds="
+              << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_precompute).count()
+              << "\n";
 
+    auto t_alloc = std::chrono::steady_clock::now();
     const std::size_t total = n_w_ * n_k_ * n_s_;
     cum_zz1_re_.assign(total, 0.); cum_zz1_im_.assign(total, 0.);
     cum_zz2_re_.assign(total, 0.); cum_zz2_im_.assign(total, 0.);
@@ -49,6 +58,9 @@ Integrator::Integrator(const std::vector<std::vector<double>> &input_phi,
     cum_yy2_re_.assign(total, 0.); cum_yy2_im_.assign(total, 0.);
     cum_xz1_re_.assign(total, 0.); cum_xz1_im_.assign(total, 0.);
     cum_xz2_re_.assign(total, 0.); cum_xz2_im_.assign(total, 0.);
+    std::cout << "Timing phase=cpu_accumulator_allocation seconds="
+              << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_alloc).count()
+              << "\n";
 }
 
 // ---------------------------------------------------------------------------

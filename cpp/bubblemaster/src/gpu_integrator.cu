@@ -2,6 +2,7 @@
 #include "interpolator.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <iostream>
@@ -526,16 +527,25 @@ GpuIntegrator::GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
 
     // --- Flatten phi to host 1-D array, transposed to [iz * n_s + is] (see
     // d_phi_'s declaration in the header for why) ---
+    auto t_flatten = std::chrono::steady_clock::now();
     std::vector<double> phi_host(n_s_ * n_z_);
     for (std::size_t is = 0; is < n_s_; ++is)
         for (std::size_t iz = 0; iz < n_z_; ++iz)
             phi_host[iz * n_s_ + is] = input_phi[is][iz];
+    std::cout << "Timing phase=gpu_host_field_flatten seconds="
+              << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_flatten).count()
+              << "\n";
 
     // --- Build phi2 on host ---
+    auto t_phi2 = std::chrono::steady_clock::now();
     std::vector<double> phi2_host;
     build_phi2(input_phi, phi2_host);
+    std::cout << "Timing phase=gpu_reference_field seconds="
+              << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_phi2).count()
+              << "\n";
 
     // --- Upload to device ---
+    auto t_device_setup = std::chrono::steady_clock::now();
     auto alloc_and_copy = [&](double **dptr, const std::vector<double> &hv) {
         CUDA_CHECK(cudaMalloc(dptr, hv.size() * sizeof(double)));
         CUDA_CHECK(cudaMemcpy(*dptr, hv.data(),
@@ -558,6 +568,10 @@ GpuIntegrator::GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
     // steps. See gw_kernel's cumbuf usage and d_cumbuf_'s declaration.
     CUDA_CHECK(cudaMalloc(&d_cumbuf_, n_w_ * n_k_ * n_s_ * 16 * sizeof(double)));
     CUDA_CHECK(cudaMemset(d_cumbuf_, 0, n_w_ * n_k_ * n_s_ * 16 * sizeof(double)));
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::cout << "Timing phase=gpu_device_setup seconds="
+              << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_device_setup).count()
+              << "\n";
 
 #ifdef GW_KERNEL_TIMING
     CUDA_CHECK(cudaMalloc(&d_timebuf_, n_w_ * n_k_ * n_s_ * 5 * sizeof(long long)));
@@ -639,6 +653,7 @@ std::vector<double> GpuIntegrator::RunAndReduce(int i_t,
               << " n_floor=" << n_floor_
               << (out_amp_re ? "  (amplitude)" : "") << "\n";
 
+    const auto t_all = std::chrono::steady_clock::now();
     std::size_t total = n_w_ * n_k_ * n_s_;
     CUDA_CHECK(cudaMemset(d_intbuf_, 0, total * 6 * sizeof(double)));
 
@@ -660,6 +675,7 @@ std::vector<double> GpuIntegrator::RunAndReduce(int i_t,
     );
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
+    const auto t_kernel_done = std::chrono::steady_clock::now();
 
 #ifdef GW_KERNEL_TIMING
     // Diagnostic-build-only: sum clock64() cycles per phase across all
@@ -693,9 +709,11 @@ std::vector<double> GpuIntegrator::RunAndReduce(int i_t,
 
     // --- Copy intermediate buffer back and reduce on CPU ---
     std::vector<double> buf(total * 6);
+    const auto t_transfer_start = std::chrono::steady_clock::now();
     CUDA_CHECK(cudaMemcpy(buf.data(), d_intbuf_,
                           buf.size() * sizeof(double),
                           cudaMemcpyDeviceToHost));
+    const auto t_transfer_done = std::chrono::steady_clock::now();
 
     const double dk = klist_[1] - klist_[0];
 
@@ -742,6 +760,16 @@ std::vector<double> GpuIntegrator::RunAndReduce(int i_t,
 
     t_cut_prev_ = t_cut;
     last_i_t_processed_ = i_t;
+    const auto t_reduce_done = std::chrono::steady_clock::now();
+    const auto seconds_between = [](auto a, auto b) {
+        return std::chrono::duration<double>(b - a).count();
+    };
+    std::cout << "Timing phase=gpu_cutoff index=" << i_t
+              << " kernel_seconds=" << seconds_between(t_all, t_kernel_done)
+              << " transfer_seconds=" << seconds_between(t_transfer_start, t_transfer_done)
+              << " reduction_seconds=" << seconds_between(t_transfer_done, t_reduce_done)
+              << " total_seconds=" << seconds_between(t_all, t_reduce_done)
+              << "\n";
     return spectrum;
 }
 

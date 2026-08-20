@@ -63,36 +63,66 @@ int main(int argc, char *argv[]) {
         std::cout << "Saving complex amplitude A(w, cos_theta)\n";
 
     // --- 1. Load setup ---
+    auto t_setup_load = Clock::now();
     Setup setup(setup_path);
+    std::cout << "Timing phase=setup_load seconds="
+              << elapsed(t_setup_load) << "\n";
 
     // --- 2. Run 2D Milne evolution ---
     auto t_evo = Clock::now();
     Evolution evo(setup);
     const auto &phi_snaps = evo.GetPhi();
-    std::cout << "Evolution: " << elapsed(t_evo) << " s\n";
+    const double evolution_seconds = elapsed(t_evo);
+    std::cout << "Evolution: " << evolution_seconds << " s\n";
+    std::cout << "Timing phase=field_evolution seconds="
+              << evolution_seconds << "\n";
 
     if (save_fields)
         SaveFields(output_dir, phi_snaps, evo.GetSlist(), setup.z);
 
     // --- 3. Run GW integration for each time index ---
+    auto t_integrator_setup = Clock::now();
     Integrator integrator(phi_snaps, setup, qual_param);
+    std::cout << "Timing phase=integrator_setup_total seconds="
+              << elapsed(t_integrator_setup) << "\n";
     const auto &wlist = integrator.GetW();
 
     const int n_t = setup.n_t;
     auto t_integ = Clock::now();
+    double compute_total = 0.;
+    double output_total = 0.;
     for (int i_t = 0; i_t < n_t; ++i_t) {
         auto t_it = Clock::now();
+        auto t_compute = Clock::now();
+        double compute_seconds = 0.;
+        double output_seconds = 0.;
         if (save_amplitude) {
             AmplitudeResult res = integrator.ComputeAmplitude(i_t);
+            compute_seconds = elapsed(t_compute);
+            auto t_output = Clock::now();
             SaveAmplitudeResult(output_dir, i_t, res);
+            output_seconds = elapsed(t_output);
         } else {
             std::vector<double> spectrum = integrator.Compute(i_t);
+            compute_seconds = elapsed(t_compute);
+            auto t_output = Clock::now();
             SaveStepResult(output_dir, i_t, wlist, spectrum);
+            output_seconds = elapsed(t_output);
         }
+        compute_total += compute_seconds;
+        output_total += output_seconds;
         std::cout << "Time index " << i_t << " / " << n_t - 1
                   << ": " << elapsed(t_it) << " s\n";
+        std::cout << "Timing phase=cutoff index=" << i_t
+                  << " compute_seconds=" << compute_seconds
+                  << " output_seconds=" << output_seconds
+                  << " total_seconds=" << elapsed(t_it) << "\n";
     }
     std::cout << "Integration total: " << elapsed(t_integ) << " s\n";
+    std::cout << "Timing phase=cutoff_all count=" << n_t
+              << " compute_seconds=" << compute_total
+              << " output_seconds=" << output_total
+              << " total_seconds=" << elapsed(t_integ) << "\n";
 
     std::cout << "Total: " << elapsed(t_start) << " s\n";
     return 0;
