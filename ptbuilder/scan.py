@@ -57,9 +57,12 @@ class ScanResult:
     k:        Optional[np.ndarray] = None   # (n_k,)
     amp_re:   Optional[np.ndarray] = None   # (n_t, n_w, n_k)
     amp_im:   Optional[np.ndarray] = None   # (n_t, n_w, n_k)
+    collision_radius: str = "mid"
 
     def to_hdf5(self, group: h5py.Group):
         group.attrs["gamma"] = self.gamma
+        group.attrs.create("collision_radius", self.collision_radius,
+                           dtype=h5py.string_dtype(encoding="ascii"))
         group.create_dataset("times",    data=self.times)
         group.create_dataset("w",        data=self.w)
         group.create_dataset("spectrum", data=self.spectrum)
@@ -71,6 +74,17 @@ class ScanResult:
 
     @classmethod
     def from_hdf5(cls, group: h5py.Group) -> "ScanResult":
+        if "collision_radius" not in group.attrs:
+            raise ValueError(
+                f"{group.name} has no collision_radius metadata; relabel the "
+                "cache explicitly before loading it"
+            )
+        if str(group.attrs["collision_radius"]) != "mid":
+            raise ValueError(
+                f"{group.name} uses collision_radius="
+                f"{group.attrs['collision_radius']!r}; relabel it to 'mid' "
+                "before loading"
+            )
         has_amp = "amp_re" in group
         return cls(
             gamma    = float(group.attrs["gamma"]),
@@ -81,6 +95,7 @@ class ScanResult:
             k        = group["k"][:]      if has_amp else None,
             amp_re   = group["amp_re"][:] if has_amp else None,
             amp_im   = group["amp_im"][:] if has_amp else None,
+            collision_radius = str(group.attrs["collision_radius"]),
         )
 
 
@@ -117,6 +132,15 @@ def run_scan(model, scan_config: ScanConfig, config=None,
     # Load existing cache
     if cache_path.exists() and not force:
         results = load_scan(cache_path)
+        cached_conventions = {r.collision_radius for r in results.values()}
+        requested = scan_config.bm_params.collision_radius
+        if cached_conventions and cached_conventions != {requested}:
+            raise ValueError(
+                f"{cache_path} uses collision_radius="
+                f"{sorted(cached_conventions)}, but this scan requests "
+                f"{requested!r}. Set BubbleMasterParams(collision_radius="
+                f"{next(iter(cached_conventions))!r}) or use a separate cache."
+            )
 
     for gamma in scan_config.gammas:
         key = float(gamma)
@@ -140,7 +164,10 @@ def run_scan(model, scan_config: ScanConfig, config=None,
         run_bubblemaster(setup_path, output_dir, cfg, save_amplitude=save_amplitude)
 
         # Read results
-        result = _read_bubblemaster_output(output_dir, gamma, scan_config.times)
+        result = _read_bubblemaster_output(
+            output_dir, gamma, scan_config.times,
+            collision_radius=scan_config.bm_params.collision_radius,
+        )
         results[key] = result
 
     # Save / update cache
@@ -150,9 +177,13 @@ def run_scan(model, scan_config: ScanConfig, config=None,
 
 
 def load_bm_result(output_dir: Path, gamma: float,
-                   times: np.ndarray) -> ScanResult:
+                   times: np.ndarray,
+                   collision_radius: str = "mid") -> ScanResult:
     """Load a single BubbleMaster run from its output directory."""
-    return _read_bubblemaster_output(Path(output_dir), gamma, times)
+    return _read_bubblemaster_output(
+        Path(output_dir), gamma, times,
+        collision_radius=collision_radius,
+    )
 
 
 def load_scan(cache_path: Path) -> Dict[float, ScanResult]:
@@ -162,6 +193,15 @@ def load_scan(cache_path: Path) -> Dict[float, ScanResult]:
         return {}
     results = {}
     with h5py.File(cache_path, "r") as f:
+        if "collision_radius" not in f.attrs:
+            raise ValueError(
+                f"{cache_path} has no collision_radius metadata; relabel it "
+                "explicitly before loading"
+            )
+        if str(f.attrs["collision_radius"]) != "mid":
+            raise ValueError(
+                f"{cache_path} does not use the required midpoint convention"
+            )
         for key in f:
             results[float(key)] = ScanResult.from_hdf5(f[key])
     return results
@@ -172,7 +212,8 @@ def load_scan(cache_path: Path) -> Dict[float, ScanResult]:
 # ---------------------------------------------------------------------------
 
 def _read_bubblemaster_output(output_dir: Path, gamma: float,
-                              times: np.ndarray) -> ScanResult:
+                              times: np.ndarray,
+                              collision_radius: str = "mid") -> ScanResult:
     """
     Read the per-time-step HDF5 files written by the new bubblemaster binary
     and assemble into a ScanResult.
@@ -241,6 +282,7 @@ def _read_bubblemaster_output(output_dir: Path, gamma: float,
         k        = k               if has_amp else None,
         amp_re   = np.array(amp_res) if has_amp else None,   # (n_t, n_w, n_k)
         amp_im   = np.array(amp_ims) if has_amp else None,   # (n_t, n_w, n_k)
+        collision_radius = collision_radius,
     )
 
 
@@ -252,7 +294,16 @@ def _save_scan_cache(results: Dict[float, ScanResult], path: Path):
         existing = load_scan(path)
     merged = {**existing, **results}
 
+    conventions = {res.collision_radius for res in merged.values()}
+    if conventions != {"mid"}:
+        raise ValueError(
+            f"Operational scan caches must use collision_radius='mid', got "
+            f"{sorted(conventions)} in {path}"
+        )
+
     with h5py.File(path, "w") as f:
+        f.attrs.create("collision_radius", conventions.pop(),
+                       dtype=h5py.string_dtype(encoding="ascii"))
         for gamma, res in merged.items():
             grp = f.require_group(str(gamma))
             res.to_hdf5(grp)

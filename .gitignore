@@ -43,6 +43,9 @@ cpp/coherent/coherent
 scripts/
 logs/
 
+# Generated root-level plots
+/*.pdf
+
 # Cluster
 load.sh
 redo.sh

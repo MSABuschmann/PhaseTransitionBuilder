@@ -141,13 +141,18 @@ class BubbleKinematics:
         return w0 / w
 
     def collision_time(self, d: float,
-                       t0_nuc: float = 0., t1_nuc: float = 0.) -> float:
+                       t0_nuc: float = 0., t1_nuc: float = 0.,
+                       collision_radius: str = "mid") -> float:
         """
         Analytical collision time for two bubbles with centre-to-centre
         separation d and nucleation times t0_nuc, t1_nuc.
-        Both bubbles are assumed to have the same rout_0.
+        ``collision_radius`` selects which wall surface first touching defines
+        the collision: ``"mid"`` (wall midpoint) or ``"out"`` (outer edge).
         """
-        R0 = self.profile.rout_0
+        if collision_radius not in ("mid", "out"):
+            raise ValueError("collision_radius must be 'mid' or 'out'")
+        R0 = (self.profile.rmid_0 if collision_radius == "mid"
+              else self.profile.rout_0)
         dt = t0_nuc - t1_nuc
         disc = (d**2 - dt**2) * (d**2 - 4*R0**2 - dt**2)
         num  = (d * np.sqrt(disc)

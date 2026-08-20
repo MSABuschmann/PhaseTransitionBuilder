@@ -20,9 +20,9 @@ class BubbleMasterParams:
     """
     All grid / physics parameters needed to run one BubbleMaster simulation.
 
-    Convention: gamma is the wall Lorentz factor at the moment the outer walls
-    first touch.  The separation d is found by brentq in _two_bubble_ic so that
-    the wall-thinning ratio Gamma(t_coll) == gamma exactly.
+    ``collision_radius`` selects whether collision means first contact of the
+    wall midpoint or outer edge.  Gamma is always the physical wall-thinning
+    ratio and is made equal to the requested gamma at that contact time.
     """
     # resolution
     dz:           float = 0.005
@@ -34,6 +34,7 @@ class BubbleMasterParams:
     # cutoff function
     cutoff_type:  int   = 0    # 0=Gaussian, 1=sin^2, 2=polynomial
     t_0_scal:     float = 1.0  # scales the cutoff decay width
+    collision_radius: str = "mid"  # "mid" or "out"
 
 
 def _mass_scale(potential) -> float:
@@ -46,7 +47,8 @@ def _mass_scale(potential) -> float:
     return 0.5 * np.sqrt(3.0 * up / lb - 8.0)
 
 
-def _two_bubble_ic(profile, gamma: float, dz: float):
+def _two_bubble_ic(profile, gamma: float, dz: float,
+                   collision_radius: str = "mid"):
     """
     Build the initial field profile and z grid for two colliding bubbles.
 
@@ -57,13 +59,14 @@ def _two_bubble_ic(profile, gamma: float, dz: float):
       - ds    : step size in s (Milne arc-length)
 
     The separation d is chosen so that the wall Lorentz factor (wall-thinning
-    ratio) equals gamma exactly at the moment the outer walls first touch.
-    This is physically correct and eliminates the mismatch between the gamma
-    parameterisation and the Gamma() measurement for thick walls.
+    ratio) equals gamma exactly when the selected wall surfaces first touch.
     """
     r_out = profile.rout_0
     r_in  = profile.rin_0
     w0    = r_out - r_in
+    if collision_radius not in ("mid", "out"):
+        raise ValueError("collision_radius must be 'mid' or 'out'")
+    r_collision = (profile.rmid_0 if collision_radius == "mid" else r_out)
 
     def _gamma_at_t(t):
         return w0 / (np.sqrt(r_out**2 + t**2) - np.sqrt(r_in**2 + t**2))
@@ -73,7 +76,7 @@ def _two_bubble_ic(profile, gamma: float, dz: float):
     else:
         t_coll = brentq(lambda t: _gamma_at_t(t) - gamma,
                         0., gamma * (r_out + r_in))
-    d  = 2.0 * np.sqrt(r_out**2 + t_coll**2)
+    d  = 2.0 * np.sqrt(r_collision**2 + t_coll**2)
     ds = dz * 0.2
 
     # Extend profile arrays for interpolation out to d
@@ -146,7 +149,8 @@ def _cutoff_times(d: float, cutoff_type: int, t_0_scal: float,
 
 
 def write_2d_setup(model, gamma: float, times: np.ndarray,
-                   path: Path, params: Optional[BubbleMasterParams] = None):
+                   path: Path, params: Optional[BubbleMasterParams] = None,
+                   wlist: Optional[np.ndarray] = None):
     """
     Write a BubbleMaster setup HDF5 file for a single (model, gamma) pair.
 
@@ -164,7 +168,9 @@ def write_2d_setup(model, gamma: float, times: np.ndarray,
     profile = model.instanton
     p       = params
 
-    z, phi0, d, ds = _two_bubble_ic(profile, gamma, p.dz)
+    z, phi0, d, ds = _two_bubble_ic(
+        profile, gamma, p.dz, p.collision_radius
+    )
 
     t_min_global       = float(times[-1]) if len(times) > 0 else 0.
     t_0, t_cut, t_m, t_max = _cutoff_times(d, p.cutoff_type, p.t_0_scal,
@@ -174,9 +180,16 @@ def write_2d_setup(model, gamma: float, times: np.ndarray,
     n_z_half = len(z)
     dz_act   = float(z[1] - z[0])
     M        = _mass_scale(model.potential)
-    wmin     = np.pi / ((n_z_half - 1) * dz_act) / 2.0
-    wmax     = min(10.0 * M, np.pi / dz_act)
-    wlist    = np.geomspace(wmin, wmax, p.n_w)
+    if wlist is None:
+        wmin  = np.pi / ((n_z_half - 1) * dz_act) / 2.0
+        wmax  = min(10.0 * M, np.pi / dz_act)
+        wlist = np.geomspace(wmin, wmax, p.n_w)
+    else:
+        wlist = np.asarray(wlist, dtype=float)
+        if wlist.ndim != 1 or len(wlist) < 2:
+            raise ValueError("wlist must be a one-dimensional array of length >= 2")
+        if np.any(wlist <= 0.0) or np.any(np.diff(wlist) <= 0.0):
+            raise ValueError("wlist must be positive and strictly increasing")
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -185,7 +198,7 @@ def write_2d_setup(model, gamma: float, times: np.ndarray,
         # Integers written as int32 to match C++ NATIVE_INT; h5py 3.x would
         # otherwise default to int64 which some HDF5 builds can't convert.
         f.attrs["n_z"]          = np.int32(n_z_half)
-        f.attrs["n_w"]          = np.int32(p.n_w)
+        f.attrs["n_w"]          = np.int32(len(wlist))
         f.attrs["n_k"]          = np.int32(p.n_k)
         f.attrs["n_t"]          = np.int32(len(times))
         f.attrs["ds"]           = float(ds)
@@ -198,6 +211,11 @@ def write_2d_setup(model, gamma: float, times: np.ndarray,
         f.attrs["t_max"]        = float(t_max)
         f.attrs["smax"]         = float(smax)
         f.attrs["cutoff_type"]  = np.int32(p.cutoff_type)
+        f.attrs.create("collision_radius", p.collision_radius,
+                       dtype=h5py.string_dtype(encoding="ascii"))
+        f.attrs["collision_r0"] = float(
+            profile.rmid_0 if p.collision_radius == "mid" else profile.rout_0
+        )
 
         # Potential group (read by C++ Potential::from_hdf5)
         pot_grp = f.require_group("potential")

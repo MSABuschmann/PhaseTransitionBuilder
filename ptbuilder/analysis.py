@@ -151,6 +151,15 @@ def load_weights(path: Path, n_t: int) -> tuple:
     gammas  : (n_collisions,) Lorentz factor per pair, or None if not in file
     """
     with h5py.File(path, "r") as f:
+        if "collision_radius" not in f.attrs:
+            raise ValueError(
+                f"{path} has no collision_radius metadata; regenerate its "
+                "weights with the midpoint convention"
+            )
+        if str(f.attrs["collision_radius"]) != "mid":
+            raise ValueError(
+                f"{path} does not use the required midpoint convention"
+            )
         flat   = f["weights"][:]
         pair_i = f["pair_i"][:].astype(int)
         pair_j = f["pair_j"][:].astype(int)
@@ -170,7 +179,8 @@ def bootstrap_spectrum(scan_results: Dict[float, "ScanResult"],
                        pair_j: np.ndarray,
                        t_range: Optional[tuple] = None,
                        k_out: Optional[np.ndarray] = None,
-                       lambda_bar: Optional[float] = None) -> tuple:
+                       lambda_bar: Optional[float] = None,
+                       collision_radius: str = "mid") -> tuple:
     """
     Bootstrap the 3D GW spectrum from the 2D scan + collision weights.
 
@@ -189,6 +199,7 @@ def bootstrap_spectrum(scan_results: Dict[float, "ScanResult"],
     t_range      : (t_min, t_max) slice of times to use (defaults to full range)
     k_out        : output k grid (defaults to common w grid)
     lambda_bar   : if given, applies BubbleMaster normalization
+    collision_radius : wall surface defining collision (``"mid"`` or ``"out"``)
 
     Returns
     -------
@@ -225,7 +236,10 @@ def bootstrap_spectrum(scan_results: Dict[float, "ScanResult"],
                                    events[bj].position,
                                    bubble_pop.box_size)
         try:
-            t_c      = kin.collision_time(d, events[bi].t_nuc, events[bj].t_nuc)
+            t_c      = kin.collision_time(
+                d, events[bi].t_nuc, events[bj].t_nuc,
+                collision_radius=collision_radius,
+            )
             gamma_ij = float(kin.Gamma(t_c, events[bi].t_nuc))
         except Exception:
             continue
@@ -252,12 +266,14 @@ def bootstrap_spectrum(scan_results: Dict[float, "ScanResult"],
 # ---------------------------------------------------------------------------
 
 def write_weights_input(path: Path, positions: np.ndarray, t: np.ndarray,
-                         kinematics, L: float, t_init: float = 0.) -> None:
+                         kinematics, L: float, t_init: float = 0.,
+                         collision_radius: str = "mid") -> None:
     """
     Write the input HDF5 expected by the cpp/weights binary.
 
-    R(t) is computed using the outer wall radius (rout_0), consistent with
-    the collision_time / Gamma definitions throughout the codebase.
+    R(t) is computed for the selected collision surface (``"mid"`` or
+    ``"out"``).  The convention and its initial radius are stored in the file
+    so the C++ calculation uses precisely the same geometry.
     rout_0 and rin_0 are stored as attributes so the binary can compute
     the Lorentz factor gamma analytically for each colliding pair.
 
@@ -269,13 +285,18 @@ def write_weights_input(path: Path, positions: np.ndarray, t: np.ndarray,
     kinematics : BubbleKinematics instance
     L          : box side length
     t_init     : nucleation time (default 0)
+    collision_radius : wall surface defining collision (``"mid"`` or ``"out"``)
     """
     positions = np.asarray(positions, dtype=float)
     t         = np.asarray(t,         dtype=float)
     n_b, n_t  = len(positions), len(t)
-    R         = kinematics.R(t, t_init=t_init, r='out')
+    if collision_radius not in ("mid", "out"):
+        raise ValueError("collision_radius must be 'mid' or 'out'")
+    R         = kinematics.R(t, t_init=t_init, r=collision_radius)
     rout_0    = float(kinematics.profile.rout_0)
     rin_0     = float(kinematics.profile.rin_0)
+    rmid_0    = float(kinematics.profile.rmid_0)
+    collision_r0 = rmid_0 if collision_radius == "mid" else rout_0
 
     with h5py.File(path, "w") as f:
         f.attrs["L"]      = float(L)
@@ -283,6 +304,10 @@ def write_weights_input(path: Path, positions: np.ndarray, t: np.ndarray,
         f.attrs["n_b"]    = int(n_b)
         f.attrs["rout_0"] = rout_0
         f.attrs["rin_0"]  = rin_0
+        f.attrs["rmid_0"] = rmid_0
+        f.attrs.create("collision_radius", collision_radius,
+                       dtype=h5py.string_dtype(encoding="ascii"))
+        f.attrs["collision_r0"] = collision_r0
         f.create_dataset("t",     data=t)
         f.create_dataset("R",     data=np.asarray(R, dtype=float))
         f.create_dataset("xlocs", data=positions[:, 0])

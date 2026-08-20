@@ -3,7 +3,9 @@
 #include "interpolator.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <omp.h>
 #include <stdexcept>
@@ -79,9 +81,19 @@ std::vector<double> Integrator::Compute(int i_t) {
 
     std::vector<double> result(n_w_);
     std::vector<double> eps_rel = geomspace(1e-5, 1e-7, n_w_);
+    const bool omega_timings = std::getenv("BM_OMEGA_TIMINGS") != nullptr;
 
     for (std::size_t i_w = 0; i_w < n_w_; ++i_w) {
+        const auto omega_start = std::chrono::steady_clock::now();
         result[i_w] = k_integral(i_w, eps_rel[i_w], t_cut, t_m, t_max, t_cut_prev);
+        if (omega_timings) {
+            const double seconds = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - omega_start).count();
+            std::cout << "Omega timing: i_t=" << i_t
+                      << " i_w=" << i_w
+                      << " omega=" << wlist_[i_w]
+                      << " seconds=" << seconds << "\n";
+        }
     }
 
     t_cut_prev_ = t_cut;
