@@ -7,17 +7,23 @@ NVCC       = nvcc
 NVCCFLAGS  = -std=c++17 -O3 -arch=sm_80 --expt-relaxed-constexpr \
              -Xcompiler -fopenmp -Xcompiler -ffast-math
 
-HDF5_INCLUDE = ${HDF5_DIR}/include
-HDF5_LIB     = ${HDF5_DIR}/lib
+# Cray's compiler wrapper supplies the HDF5 include/library paths when the
+# cray-hdf5 module is loaded.  Retain support for installations which expose
+# HDF5_DIR, but do not turn an unset variable into the bogus paths /include
+# and /lib.
+ifneq ($(strip ${HDF5_DIR}),)
+HDF5_CPPFLAGS = -I${HDF5_DIR}/include
+HDF5_LDFLAGS  = -L${HDF5_DIR}/lib
+endif
 
-INCLUDES = -I../../common -I$(HDF5_INCLUDE)
+INCLUDES = -I../../common $(HDF5_CPPFLAGS)
 
 # GSL version
-LIBS_GSL   = -L$(HDF5_LIB) -lhdf5_cpp -lhdf5 -lgsl -lgslcblas -lm -fopenmp
+LIBS_GSL   = $(HDF5_LDFLAGS) -lhdf5_cpp -lhdf5 -lgsl -lgslcblas -lm -fopenmp
 # Filon version — no GSL dependency
-LIBS_FILON = -L$(HDF5_LIB) -lhdf5_cpp -lhdf5 -lm -fopenmp
+LIBS_FILON = $(HDF5_LDFLAGS) -lhdf5_cpp -lhdf5 -lm -fopenmp
 # GPU version — nvcc links cudart automatically
-LIBS_GPU   = -L$(HDF5_LIB) -lhdf5_cpp -lhdf5 -lm -Xcompiler -fopenmp
+LIBS_GPU   = $(HDF5_LDFLAGS) -lhdf5_cpp -lhdf5 -lm -Xcompiler -fopenmp
 
 SRCDIR = src
 
