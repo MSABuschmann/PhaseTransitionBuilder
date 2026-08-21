@@ -142,20 +142,22 @@ __device__ __forceinline__ void fs_result(const FStream &fs,
 }
 
 // ---------------------------------------------------------------------------
-// N for one sub-interval: 64 panels per Bessel oscillation, floor=n_floor
+// N for one sub-interval: configurable panels per Bessel oscillation,
+// floor=n_floor
 // (default 8192, matching CPU Filon's FILON_N_MIN — see filon.h).
 // Uses delta-ib = ib(b) - ib(a) so each segment is resolved independently.
 // ---------------------------------------------------------------------------
 
 __device__ __forceinline__ int filon_N(double a, double b, double sign,
                                         double w, double Sqrt1mkk, double s,
-                                        int n_floor)
+                                        int n_floor, int panels_per_oscillation)
 {
     const double u2s_a = a * a + sign;
     const double ib_a  = (u2s_a > 0.) ? w * Sqrt1mkk * s * sqrt(u2s_a) : 0.;
     const double u2s_b = b * b + sign;
     const double ib_b  = (u2s_b > 0.) ? w * Sqrt1mkk * s * sqrt(u2s_b) : 0.;
-    int N = max(n_floor, (int)(64.0 * (ib_b - ib_a) / (2.0 * M_PI)) + 2);
+    int N = max(n_floor, (int)(panels_per_oscillation *
+                (ib_b - ib_a) / (2.0 * M_PI)) + 2);
     return (N + 1) & ~1;
 }
 
@@ -241,7 +243,8 @@ __device__ void filon_zz_incremental(
     double s, double Sqrt1mkk, double w,
     double sign, double umin,
     double t_cut, double t_m, double t_0, double t_max,
-    int cutoff_type, int n_floor, double t_cut_prev,
+    int cutoff_type, int n_floor, int panels_per_oscillation,
+    double t_cut_prev,
     double &cum_re, double &cum_im,
     double &zz_r, double &zz_i)
 {
@@ -257,7 +260,8 @@ __device__ void filon_zz_incremental(
     const double plateau_prev = fmax(umin, t_cut_prev / s);
 
     if (plateau_now > plateau_prev) {
-        int N = filon_N(plateau_prev, plateau_now, sign, w, Sqrt1mkk, s, n_floor);
+        int N = filon_N(plateau_prev, plateau_now, sign, w, Sqrt1mkk, s,
+                        n_floor, panels_per_oscillation);
         double d_r, d_i, dum_r, dum_i, dum2_r, dum2_i, dum3_r, dum3_i;
         filon_segment<true, false>(s, Sqrt1mkk, w, sign,
             plateau_prev, plateau_now, N,
@@ -268,7 +272,8 @@ __device__ void filon_zz_incremental(
 
     double win_r = 0., win_i = 0.;
     if (u_top > plateau_now) {
-        int N = filon_N(plateau_now, u_top, sign, w, Sqrt1mkk, s, n_floor);
+        int N = filon_N(plateau_now, u_top, sign, w, Sqrt1mkk, s,
+                        n_floor, panels_per_oscillation);
         double dum_r, dum_i, dum2_r, dum2_i, dum3_r, dum3_i;
         filon_segment<true, false>(s, Sqrt1mkk, w, sign,
             plateau_now, u_top, N,
@@ -284,7 +289,8 @@ __device__ void filon_xyz_incremental(
     double s, double Sqrt1mkk, double w,
     double sign, double umin,
     double t_cut, double t_m, double t_0, double t_max,
-    int cutoff_type, int n_floor, double t_cut_prev,
+    int cutoff_type, int n_floor, int panels_per_oscillation,
+    double t_cut_prev,
     double &cum_xx_re, double &cum_xx_im,
     double &cum_yy_re, double &cum_yy_im,
     double &cum_xz_re, double &cum_xz_im,
@@ -306,7 +312,8 @@ __device__ void filon_xyz_incremental(
     const double plateau_prev = fmax(umin, t_cut_prev / s);
 
     if (plateau_now > plateau_prev) {
-        int N = filon_N(plateau_prev, plateau_now, sign, w, Sqrt1mkk, s, n_floor);
+        int N = filon_N(plateau_prev, plateau_now, sign, w, Sqrt1mkk, s,
+                        n_floor, panels_per_oscillation);
         double dum_r, dum_i, d_xx_r, d_xx_i, d_yy_r, d_yy_i, d_xz_r, d_xz_i;
         filon_segment<false, true>(s, Sqrt1mkk, w, sign,
             plateau_prev, plateau_now, N,
@@ -319,7 +326,8 @@ __device__ void filon_xyz_incremental(
 
     double w_xx_r = 0., w_xx_i = 0., w_yy_r = 0., w_yy_i = 0., w_xz_r = 0., w_xz_i = 0.;
     if (u_top > plateau_now) {
-        int N = filon_N(plateau_now, u_top, sign, w, Sqrt1mkk, s, n_floor);
+        int N = filon_N(plateau_now, u_top, sign, w, Sqrt1mkk, s,
+                        n_floor, panels_per_oscillation);
         double dum_r, dum_i;
         filon_segment<false, true>(s, Sqrt1mkk, w, sign,
             plateau_now, u_top, N,
@@ -345,7 +353,7 @@ __device__ void filon_xyz_incremental(
 // at cumbuf[idx*16 .. idx*16+15]; see GpuIntegrator::d_cumbuf_ for the layout.
 // ---------------------------------------------------------------------------
 
-__global__ void gw_kernel(
+__global__ void precompute_z_kernel(
     const double * __restrict__ phi,     // [n_s * n_z]
     const double * __restrict__ phi2,    // [n_s * n_z]
     int n_s, int n_z, int n_w, int n_k,
@@ -353,9 +361,71 @@ __global__ void gw_kernel(
     const double * __restrict__ z_arr,   // [n_z]
     const double * __restrict__ w_arr,   // [n_w]
     const double * __restrict__ k_arr,   // [n_k]
+    double * __restrict__ zbuf)          // [n_w * n_k * n_s * 6]
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n_w * n_k * n_s) return;
+
+    int i_s = idx % n_s;
+    int i_k = (idx / n_s) % n_k;
+    int i_w = idx / (n_k * n_s);
+    if (i_s == 0) return;
+
+    const double w = w_arr[i_w];
+    const double k = k_arr[i_k];
+    if (k == 1. || k == -1.) return;
+
+    double iz1_zz = 0., iz2_zz = 0.;
+    for (int iz = 1; iz < n_z; ++iz) {
+        double zm   = z_arr[iz] - dz * 0.5;
+        double czm  = cos(w * k * zm);
+        double q1   = (phi [iz*n_s + i_s] - phi [(iz-1)*n_s + i_s]) / dz;
+        double q2   = (phi2[iz*n_s + i_s] - phi2[(iz-1)*n_s + i_s]) / dz;
+        iz1_zz += dz * 2.0 * czm * q1 * q1;
+        iz2_zz += dz * 2.0 * czm * q2 * q2;
+    }
+
+    double iz1_xa = 0., iz2_xa = 0.;
+    for (int iz = 0; iz < n_z; ++iz) {
+        double fz  = (iz == 0 || iz == n_z-1) ? 0.5 : 1.0;
+        double cz  = cos(w * k * z_arr[iz]);
+        double q1  = (phi [iz*n_s + i_s] - phi [iz*n_s + (i_s-1)]) / ds;
+        double q2  = (phi2[iz*n_s + i_s] - phi2[iz*n_s + (i_s-1)]) / ds;
+        iz1_xa += fz * dz * 2.0 * cz * q1 * q1;
+        iz2_xa += fz * dz * 2.0 * cz * q2 * q2;
+    }
+
+    double iz1_xz = 0., iz2_xz = 0.;
+    for (int iz = 1; iz < n_z; ++iz) {
+        double szm  = sin(w * k * (z_arr[iz] - dz * 0.5));
+        double ds1  = 0.5/ds * (phi [iz*n_s+i_s]     - phi [iz*n_s+(i_s-1)]
+                               + phi [(iz-1)*n_s+i_s] - phi [(iz-1)*n_s+(i_s-1)]);
+        double dz1  = 0.5/dz * (phi [iz*n_s+i_s]     - phi [(iz-1)*n_s+i_s]
+                               + phi [iz*n_s+(i_s-1)] - phi [(iz-1)*n_s+(i_s-1)]);
+        double ds2  = 0.5/ds * (phi2[iz*n_s+i_s]     - phi2[iz*n_s+(i_s-1)]
+                               + phi2[(iz-1)*n_s+i_s] - phi2[(iz-1)*n_s+(i_s-1)]);
+        double dz2  = 0.5/dz * (phi2[iz*n_s+i_s]     - phi2[(iz-1)*n_s+i_s]
+                               + phi2[iz*n_s+(i_s-1)] - phi2[(iz-1)*n_s+(i_s-1)]);
+        iz1_xz += dz * 2.0 * szm * ds1 * dz1;
+        iz2_xz += dz * 2.0 * szm * ds2 * dz2;
+    }
+
+    double *out = zbuf + idx * 6;
+    out[0] = iz1_zz; out[1] = iz2_zz;
+    out[2] = iz1_xa; out[3] = iz2_xa;
+    out[4] = iz1_xz; out[5] = iz2_xz;
+}
+
+__global__ void gw_kernel(
+    int n_s, int n_w, int n_k,
+    double ds,
+    const double * __restrict__ w_arr,   // [n_w]
+    const double * __restrict__ k_arr,   // [n_k]
     const double * __restrict__ s_arr,   // [n_s]
+    const double * __restrict__ zbuf,    // [n_w * n_k * n_s * 6]
     double t_cut, double t_m, double t_0, double t_max,
-    int cutoff_type, int n_floor, double t_cut_prev,
+    int cutoff_type, int n_floor, int panels_per_oscillation,
+    double t_cut_prev,
     double * __restrict__ intbuf,        // [n_w * n_k * n_s * 6]
     double * __restrict__ cumbuf         // [n_w * n_k * n_s * 16] — persists across launches
 #ifdef GW_KERNEL_TIMING
@@ -398,20 +468,24 @@ __global__ void gw_kernel(
     // --- u-integrals (incremental — see filon_zz_incremental/filon_xyz_incremental) ---
     double zz_r1, zz_i1, zz_r2, zz_i2;
     filon_zz_incremental(s, Sqrt1mkk, w, -1., 1.,
-                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor, t_cut_prev,
+                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor,
+                        panels_per_oscillation, t_cut_prev,
                         cum_zz1_re, cum_zz1_im, zz_r1, zz_i1);
     filon_zz_incremental(s, Sqrt1mkk, w, +1., 0.,
-                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor, t_cut_prev,
+                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor,
+                        panels_per_oscillation, t_cut_prev,
                         cum_zz2_re, cum_zz2_im, zz_r2, zz_i2);
 
     double xx1, xi1, yy1, yi1, xz1, xzi1;
     double xx2, xi2, yy2, yi2, xz2, xzi2;
     filon_xyz_incremental(s_off, Sqrt1mkk, w, -1., 1.,
-                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor, t_cut_prev,
+                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor,
+                        panels_per_oscillation, t_cut_prev,
                         cum_xx1_re, cum_xx1_im, cum_yy1_re, cum_yy1_im, cum_xz1_re, cum_xz1_im,
                         xx1, xi1, yy1, yi1, xz1, xzi1);
     filon_xyz_incremental(s_off, Sqrt1mkk, w, +1., 0.,
-                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor, t_cut_prev,
+                        t_cut, t_m, t_0, t_max, cutoff_type, n_floor,
+                        panels_per_oscillation, t_cut_prev,
                         cum_xx2_re, cum_xx2_im, cum_yy2_re, cum_yy2_im, cum_xz2_re, cum_xz2_im,
                         xx2, xi2, yy2, yi2, xz2, xzi2);
 
@@ -419,53 +493,20 @@ __global__ void gw_kernel(
     long long t1 = clock64();
 #endif
 
-    // --- z-integrals ---
-    // phi/phi2 layout is [iz * n_s + is] (transposed vs. the natural
-    // [is][iz]) so that consecutive threads (consecutive i_s) hit
-    // consecutive memory for a fixed iz -- coalesced. See d_phi_'s
-    // declaration in the header for why.
-    double iz1_zz = 0., iz2_zz = 0.;
-    for (int iz = 1; iz < n_z; ++iz) {
-        double zm   = z_arr[iz] - dz * 0.5;
-        double czm  = cos(w * k * zm);
-        double q1   = (phi [iz*n_s + i_s] - phi [(iz-1)*n_s + i_s]) / dz;
-        double q2   = (phi2[iz*n_s + i_s] - phi2[(iz-1)*n_s + i_s]) / dz;
-        iz1_zz += dz * 2.0 * czm * q1 * q1;
-        iz2_zz += dz * 2.0 * czm * q2 * q2;
-    }
+    const double *izvals = zbuf + idx * 6;
+    const double iz1_zz = izvals[0], iz2_zz = izvals[1];
 
 #ifdef GW_KERNEL_TIMING
     long long t2 = clock64();
 #endif
 
-    double iz1_xa = 0., iz2_xa = 0.;
-    for (int iz = 0; iz < n_z; ++iz) {
-        double fz  = (iz == 0 || iz == n_z-1) ? 0.5 : 1.0;
-        double cz  = cos(w * k * z_arr[iz]);
-        double q1  = (phi [iz*n_s + i_s] - phi [iz*n_s + (i_s-1)]) / ds;
-        double q2  = (phi2[iz*n_s + i_s] - phi2[iz*n_s + (i_s-1)]) / ds;
-        iz1_xa += fz * dz * 2.0 * cz * q1 * q1;
-        iz2_xa += fz * dz * 2.0 * cz * q2 * q2;
-    }
+    const double iz1_xa = izvals[2], iz2_xa = izvals[3];
 
 #ifdef GW_KERNEL_TIMING
     long long t3 = clock64();
 #endif
 
-    double iz1_xz = 0., iz2_xz = 0.;
-    for (int iz = 1; iz < n_z; ++iz) {
-        double szm  = sin(w * k * (z_arr[iz] - dz * 0.5));
-        double ds1  = 0.5/ds * (phi [iz*n_s+i_s]     - phi [iz*n_s+(i_s-1)]
-                               + phi [(iz-1)*n_s+i_s] - phi [(iz-1)*n_s+(i_s-1)]);
-        double dz1  = 0.5/dz * (phi [iz*n_s+i_s]     - phi [(iz-1)*n_s+i_s]
-                               + phi [iz*n_s+(i_s-1)] - phi [(iz-1)*n_s+(i_s-1)]);
-        double ds2  = 0.5/ds * (phi2[iz*n_s+i_s]     - phi2[iz*n_s+(i_s-1)]
-                               + phi2[(iz-1)*n_s+i_s] - phi2[(iz-1)*n_s+(i_s-1)]);
-        double dz2  = 0.5/dz * (phi2[iz*n_s+i_s]     - phi2[(iz-1)*n_s+i_s]
-                               + phi2[iz*n_s+(i_s-1)] - phi2[(iz-1)*n_s+(i_s-1)]);
-        iz1_xz += dz * 2.0 * szm * ds1 * dz1;
-        iz2_xz += dz * 2.0 * szm * ds2 * dz2;
-    }
+    const double iz1_xz = izvals[4], iz2_xz = izvals[5];
 
 #ifdef GW_KERNEL_TIMING
     long long t4 = clock64();
@@ -501,7 +542,8 @@ __global__ void gw_kernel(
 // ---------------------------------------------------------------------------
 
 GpuIntegrator::GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
-                              const Setup &setup, int param)
+                             const Setup &setup, int param,
+                             int panels_per_oscillation)
     : n_k_(setup.n_k), n_w_(setup.n_w),
       ds_(setup.ds * setup.how_often_ds),
       dz_(std::abs(setup.z[1] - setup.z[0])),
@@ -509,7 +551,8 @@ GpuIntegrator::GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
       t_max_base_(setup.t_max), t_0_(setup.t_0),
       d_(setup.d), cutoff_type_(setup.cutoff_type),
       z_(setup.z), wlist_(setup.wlist), times_(setup.times),
-      param_floor_(param > 0 ? (param + 1) & ~1 : -1)
+      param_floor_(param > 0 ? (param + 1) & ~1 : -1),
+      panels_per_oscillation_(panels_per_oscillation)
 {
     n_z_ = z_.size();
     n_s_ = input_phi.size();
@@ -560,6 +603,30 @@ GpuIntegrator::GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
     alloc_and_copy(&d_k_,    klist_);
     alloc_and_copy(&d_s_,    slist_);
 
+    const std::size_t total = n_w_ * n_k_ * n_s_;
+    CUDA_CHECK(cudaMalloc(&d_zbuf_, total * 6 * sizeof(double)));
+    CUDA_CHECK(cudaMemset(d_zbuf_, 0, total * 6 * sizeof(double)));
+    constexpr int PRECOMPUTE_BLOCK = 256;
+    const int precompute_grid =
+        (static_cast<int>(total) + PRECOMPUTE_BLOCK - 1) / PRECOMPUTE_BLOCK;
+    const auto t_z_precompute = std::chrono::steady_clock::now();
+    precompute_z_kernel<<<precompute_grid, PRECOMPUTE_BLOCK>>>(
+        d_phi_, d_phi2_, static_cast<int>(n_s_), static_cast<int>(n_z_),
+        static_cast<int>(n_w_), static_cast<int>(n_k_), ds_, dz_,
+        d_z_, d_w_, d_k_, d_zbuf_);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::cout << "Timing phase=gpu_z_precompute seconds="
+              << std::chrono::duration<double>(
+                     std::chrono::steady_clock::now() - t_z_precompute).count()
+              << "\n";
+
+    // The time-dependent kernels now consume only zbuf, so release the much
+    // larger field histories immediately after the one-time z transform.
+    CUDA_CHECK(cudaFree(d_phi_));  d_phi_ = nullptr;
+    CUDA_CHECK(cudaFree(d_phi2_)); d_phi2_ = nullptr;
+    CUDA_CHECK(cudaFree(d_z_));    d_z_ = nullptr;
+
     CUDA_CHECK(cudaMalloc(&d_intbuf_, n_w_ * n_k_ * n_s_ * 6 * sizeof(double)));
 
     // Persistent plateau-accumulator buffer: allocated once, zeroed once, and
@@ -590,6 +657,7 @@ GpuIntegrator::~GpuIntegrator()
     cudaFree(d_w_);
     cudaFree(d_k_);
     cudaFree(d_s_);
+    cudaFree(d_zbuf_);
     cudaFree(d_intbuf_);
     cudaFree(d_cumbuf_);
 #ifdef GW_KERNEL_TIMING
@@ -651,6 +719,7 @@ std::vector<double> GpuIntegrator::RunAndReduce(int i_t,
     std::cout << "GpuIntegrator::RunAndReduce i_t=" << i_t
               << " shift=" << shift << " t_m=" << t_m
               << " n_floor=" << n_floor_
+              << " panels_per_osc=" << panels_per_oscillation_
               << (out_amp_re ? "  (amplitude)" : "") << "\n";
 
     const auto t_all = std::chrono::steady_clock::now();
@@ -661,13 +730,11 @@ std::vector<double> GpuIntegrator::RunAndReduce(int i_t,
     int grid = (static_cast<int>(total) + BLOCK - 1) / BLOCK;
 
     gw_kernel<<<grid, BLOCK>>>(
-        d_phi_, d_phi2_,
-        static_cast<int>(n_s_), static_cast<int>(n_z_),
+        static_cast<int>(n_s_),
         static_cast<int>(n_w_), static_cast<int>(n_k_),
-        ds_, dz_,
-        d_z_, d_w_, d_k_, d_s_,
+        ds_, d_w_, d_k_, d_s_, d_zbuf_,
         t_cut, t_m, t_0_, t_max,
-        cutoff_type_, n_floor_, t_cut_prev,
+        cutoff_type_, n_floor_, panels_per_oscillation_, t_cut_prev,
         d_intbuf_, d_cumbuf_
 #ifdef GW_KERNEL_TIMING
         , d_timebuf_

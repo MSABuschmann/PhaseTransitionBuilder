@@ -34,8 +34,10 @@ int main(int argc, char *argv[]) {
     auto t_start = Clock::now();
     if (argc < 3) {
         std::cerr << "Usage: bubblemaster <setup.h5> <output_dir/>"
-                     " [--save-fields] [--save-amplitude] [--param N]\n"
+                     " [--save-fields] [--save-amplitude] [--param N]"
+                     " [--filon-panels-per-osc N]\n"
                      "  --param N         Filon: N_min panels; GSL: subinterval limit\n"
+                     "  --filon-panels-per-osc N  GPU Filon panels per Bessel oscillation\n"
                      "  --save-amplitude  Also write Re/Im A(w,cos_theta) to result files\n";
         return 1;
     }
@@ -45,6 +47,7 @@ int main(int argc, char *argv[]) {
     bool save_fields    = false;
     bool save_amplitude = false;
     int  qual_param     = -1;   // -1 → use compiled default
+    int  filon_panels_per_osc = 64;
     for (int i = 3; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--save-fields")
@@ -53,6 +56,8 @@ int main(int argc, char *argv[]) {
             save_amplitude = true;
         else if (a == "--param" && i + 1 < argc)
             qual_param = std::atoi(argv[++i]);
+        else if (a == "--filon-panels-per-osc" && i + 1 < argc)
+            filon_panels_per_osc = std::atoi(argv[++i]);
     }
 
     std::cout << "Setup:  " << setup_path << "\n";
@@ -82,7 +87,16 @@ int main(int argc, char *argv[]) {
 
     // --- 3. Run GW integration for each time index ---
     auto t_integrator_setup = Clock::now();
+#ifdef USE_GPU
+    if (filon_panels_per_osc < 2) {
+        std::cerr << "--filon-panels-per-osc must be at least 2\n";
+        return 1;
+    }
+    Integrator integrator(phi_snaps, setup, qual_param,
+                          filon_panels_per_osc);
+#else
     Integrator integrator(phi_snaps, setup, qual_param);
+#endif
     std::cout << "Timing phase=integrator_setup_total seconds="
               << elapsed(t_integrator_setup) << "\n";
     const auto &wlist = integrator.GetW();

@@ -14,7 +14,8 @@
 //   - Streaming Filon u-integral: no array allocation, accumulators live in
 //     registers.  N is chosen adaptively per call to resolve Bessel-function
 //     oscillations inside g(u), same criterion as the CPU Filon version.
-//   - z-integrals are computed serially within each thread.
+//   - z-integrals are computed once in a separate GPU kernel and reused for
+//     every cutoff-time launch.
 //   - Each thread writes 6 linear contributions to a device buffer.
 //   - CPU finalisation: reduce over i_s, square, k-integrate → spectrum.
 
@@ -23,7 +24,8 @@ public:
     // param > 0: use param directly as n_floor (same as --param N for CPU Filon)
     // param <= 0: default n_floor = 8192
     GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
-                  const Setup &setup, int param = -1);
+                  const Setup &setup, int param = -1,
+                  int panels_per_oscillation = 64);
     ~GpuIntegrator();
 
     // IMPORTANT: the plateau (C1==1) portion of the u-integral is accumulated
@@ -71,20 +73,19 @@ private:
 
     int param_floor_ = -1;  // from constructor param; -1 → adaptive
     int n_floor_     = 0;   // resolved each Compute()
+    int panels_per_oscillation_ = 64;
 
     // Device arrays (allocated in constructor, freed in destructor)
     // Layout: [iz * n_s + is] (transposed relative to the natural [is][iz]
     // input), so consecutive threads (consecutive i_s -- the fastest-varying
-    // index in gw_kernel) read consecutive memory for a fixed iz. Coalesced,
-    // unlike [is * n_z + iz] where consecutive threads would be n_z elements
-    // apart -- see gw_kernel's z-integral loops and GpuIntegrator's flatten
-    // code / build_phi2.
+    // index in precompute_z_kernel) read consecutive memory for a fixed iz.
     double *d_phi_    = nullptr;   // [n_z * n_s]
     double *d_phi2_   = nullptr;   // [n_z * n_s]
     double *d_z_      = nullptr;   // [n_z]
     double *d_w_      = nullptr;   // [n_w]
     double *d_k_      = nullptr;   // [n_k]
     double *d_s_      = nullptr;   // [n_s]
+    double *d_zbuf_   = nullptr;   // [n_w * n_k * n_s * 6], precomputed once
     double *d_intbuf_ = nullptr;   // [n_w * n_k * n_s * 6]  — reused each Compute()
 
 #ifdef GW_KERNEL_TIMING
