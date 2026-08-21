@@ -37,7 +37,7 @@ all: $(TARGET)
 $(TARGET): $(OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LIBS)
 
-$(SRCDIR)/%.o: $(SRCDIR)/%.cpp
+$(SRCDIR)/%.o: $(SRCDIR)/%.cpp $(SRCDIR)/interaction.h ../common/hdf5_utils.h
 	$(CXX) $(CXXFLAGS) $(INCLUDES) -c -o $@ $<
 
 clean:

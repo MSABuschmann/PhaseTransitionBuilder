@@ -1,6 +1,7 @@
 #include <H5Cpp.h>
 #include <hdf5.h>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,16 @@ static WeightsSetup read_setup(const std::string &path) {
     s.L      = read_attr_double(file, "L");
     s.rout_0 = read_attr_double(file, "rout_0");
     s.rin_0  = read_attr_double(file, "rin_0");
+    if (!file.attrExists("collision_r0") ||
+        !file.attrExists("collision_radius"))
+        throw std::runtime_error(
+            "Weights input lacks collision-radius metadata; regenerate or "
+            "relabel it explicitly before use");
+    s.collision_r0 = read_attr_double(file, "collision_r0");
+    s.collision_radius = read_attr_string(file, "collision_radius");
+    if (s.collision_radius != "mid")
+        throw std::runtime_error(
+            "Operational weights inputs must use collision_radius='mid'");
     s.n_t    = read_attr_int   (file, "n_t");
     s.n_b    = read_attr_int   (file, "n_b");
     s.t      = read_vector(file, "t");
@@ -51,7 +62,8 @@ int main(int argc, char *argv[]) {
 
     WeightsSetup setup = read_setup(in_path);
     std::cout << "Bubbles: " << setup.n_b
-              << "  Time steps: " << setup.n_t << "\n";
+              << "  Time steps: " << setup.n_t
+              << "  Collision radius: " << setup.collision_radius << "\n";
 
     std::vector<double>            flat_weights;
     std::vector<std::pair<int,int>> collision_pairs;
@@ -61,13 +73,14 @@ int main(int argc, char *argv[]) {
     std::cout << "Collisions found: " << n_pairs << "\n";
 
     // Compute gamma per pair analytically.
-    // Collision: outer walls touch → d = 2*R_out(t_m), so R_out(t_m) = d/2.
-    // Gamma = (rout_0 - rin_0) / (R_out(t_m) - R_in(t_m))
-    //       = (rout_0 - rin_0) / (d/2 - sqrt(rin_0^2 + t_m^2))
-    // where t_m = sqrt(d^2/4 - rout_0^2).
+    // Collision: the selected surfaces touch, d = 2*R_collision(t_m).
+    // Gamma = (rout_0 - rin_0) / (R_out(t_m) - R_in(t_m)), where
+    // t_m^2 = d^2/4 - collision_r0^2.  Only for the "out" convention is
+    // R_out(t_m)=d/2; retaining both evolved radii also handles "mid".
     // d uses the minimum-image convention for periodic boundary conditions.
     const double rout_0 = setup.rout_0;
     const double rin_0  = setup.rin_0;
+    const double collision_r0 = setup.collision_r0;
     const double L      = setup.L;
     const double w0     = rout_0 - rin_0;
 
@@ -80,9 +93,10 @@ int main(int argc, char *argv[]) {
         for (int k = 0; k < 3; ++k)
             dp[k] -= L * std::round(dp[k] / L);
         double d      = dp.norm();
-        double tm_sq  = std::max(0., d*d/4. - rout_0*rout_0);
+        double tm_sq  = std::max(0., d*d/4. - collision_r0*collision_r0);
+        double R_out_m = std::sqrt(rout_0*rout_0 + tm_sq);
         double R_in_m = std::sqrt(rin_0*rin_0 + tm_sq);
-        gammas[p]     = w0 / (d/2. - R_in_m);
+        gammas[p]     = w0 / (R_out_m - R_in_m);
     }
 
     // Write output
@@ -90,6 +104,8 @@ int main(int argc, char *argv[]) {
 
     write_attr_int(out, "n_pairs", n_pairs);
     write_attr_int(out, "n_t",     setup.n_t);
+    write_attr_double(out, "collision_r0", setup.collision_r0);
+    write_attr_string(out, "collision_radius", setup.collision_radius);
 
     write_vector(out, "weights", flat_weights);
     write_vector(out, "pair_i",  pair_i);

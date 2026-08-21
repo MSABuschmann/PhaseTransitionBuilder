@@ -1,14 +1,17 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <string>
 #include <vector>
 
 struct WeightsSetup {
     double L;
     double rout_0, rin_0;             // outer/inner wall radii at t=0
+    double collision_r0;              // selected mid/outer surface at t=0
+    std::string collision_radius;      // "mid" or "out"
     int    n_t, n_b;
     std::vector<double>          t;    // time points  [n_t]
-    std::vector<double>          R;    // outer wall radius R_out(t) [n_t]
+    std::vector<double>          R;    // selected collision radius R(t) [n_t]
     std::vector<Eigen::Vector3d> pos;  // positions    [n_b]
 };
 
