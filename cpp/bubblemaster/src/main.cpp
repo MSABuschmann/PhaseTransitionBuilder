@@ -38,7 +38,7 @@ int main(int argc, char *argv[]) {
                      " [--filon-panels-per-osc N] [--s-batch-size N]\n"
                      "  --param N         Filon: N_min panels; GSL: subinterval limit\n"
                      "  --filon-panels-per-osc N  GPU Filon panels per Bessel oscillation\n"
-                     "  --s-batch-size N  GPU only: s-slices streamed per batch (default 32)\n"
+                     "  --s-batch-size N  GPU only: s-slices streamed per batch (default 128)\n"
                      "  --save-amplitude  Also write Re/Im A(w,cos_theta) to result files\n";
         return 1;
     }
@@ -49,7 +49,7 @@ int main(int argc, char *argv[]) {
     bool save_amplitude = false;
     int  qual_param     = -1;   // -1 → use compiled default
     int  filon_panels_per_osc = 64;
-    int  s_batch_size   = 32;
+    int  s_batch_size   = 128;  // locked production value -- see AI_HANDOFF.md
     for (int i = 3; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--save-fields")
