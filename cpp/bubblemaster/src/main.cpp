@@ -8,7 +8,7 @@
 
 #ifdef USE_GPU
 #  include "gpu_integrator.cuh"
-   using Integrator = GpuIntegrator;
+#  include "s_batch_window.h"
 #elif defined(USE_FILON)
 #  include "filon_integrator.h"
    using Integrator = FilonIntegrator;
@@ -35,9 +35,10 @@ int main(int argc, char *argv[]) {
     if (argc < 3) {
         std::cerr << "Usage: bubblemaster <setup.h5> <output_dir/>"
                      " [--save-fields] [--save-amplitude] [--param N]"
-                     " [--filon-panels-per-osc N]\n"
+                     " [--filon-panels-per-osc N] [--s-batch-size N]\n"
                      "  --param N         Filon: N_min panels; GSL: subinterval limit\n"
                      "  --filon-panels-per-osc N  GPU Filon panels per Bessel oscillation\n"
+                     "  --s-batch-size N  GPU only: s-slices streamed per batch (default 32)\n"
                      "  --save-amplitude  Also write Re/Im A(w,cos_theta) to result files\n";
         return 1;
     }
@@ -48,6 +49,7 @@ int main(int argc, char *argv[]) {
     bool save_amplitude = false;
     int  qual_param     = -1;   // -1 → use compiled default
     int  filon_panels_per_osc = 64;
+    int  s_batch_size   = 32;
     for (int i = 3; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--save-fields")
@@ -58,6 +60,8 @@ int main(int argc, char *argv[]) {
             qual_param = std::atoi(argv[++i]);
         else if (a == "--filon-panels-per-osc" && i + 1 < argc)
             filon_panels_per_osc = std::atoi(argv[++i]);
+        else if (a == "--s-batch-size" && i + 1 < argc)
+            s_batch_size = std::atoi(argv[++i]);
     }
 
     std::cout << "Setup:  " << setup_path << "\n";
@@ -73,7 +77,83 @@ int main(int argc, char *argv[]) {
     std::cout << "Timing phase=setup_load seconds="
               << elapsed(t_setup_load) << "\n";
 
-    // --- 2. Run 2D Milne evolution ---
+#ifdef USE_GPU
+    // The streaming GPU integrator keeps device (and evolution) memory
+    // bounded by processing the field history in batches of s-slices rather
+    // than holding the complete history at once (see AI_HANDOFF.md's
+    // "Planned minimal-memory GPU rewrite"). --save-fields dumps the
+    // complete history to disk, which is exactly what this design avoids
+    // ever materializing -- so it's a hard error here rather than silently
+    // reintroducing O(n_s*n_z) memory. Use the CPU binary for field dumps.
+    if (save_fields) {
+        std::cerr << "--save-fields is not supported by the GPU binary "
+                     "(bounded-memory streaming never materializes the "
+                     "complete field history); use the CPU binary instead, "
+                     "or omit --save-fields.\n";
+        return 1;
+    }
+    if (filon_panels_per_osc < 2) {
+        std::cerr << "--filon-panels-per-osc must be at least 2\n";
+        return 1;
+    }
+    if (s_batch_size < 1) {
+        std::cerr << "--s-batch-size must be at least 1\n";
+        return 1;
+    }
+
+    auto t_integrator_setup = Clock::now();
+    GpuIntegrator integrator(setup, qual_param, filon_panels_per_osc, s_batch_size);
+    std::cout << "Timing phase=integrator_setup_total seconds="
+              << elapsed(t_integrator_setup) << "\n";
+
+    // --- 2+3. Stream the 2D Milne evolution through bounded s-batches,
+    // running the GW integration (all cutoff times, for each batch) as each
+    // batch becomes available, instead of evolving the complete history
+    // first and integrating it afterwards. ---
+    auto t_stream = Clock::now();
+    {
+        SBatchWindow window(s_batch_size,
+            [&](const std::vector<std::vector<double>> &phi_batch,
+                const std::vector<double> &s_batch,
+                bool is_first_batch, bool is_last_batch) {
+                integrator.ProcessBatch(phi_batch, s_batch, is_first_batch, is_last_batch);
+            });
+        Evolution evo(setup,
+            [&](const std::vector<double> &phi, double s, bool is_last) {
+                window.Push(phi, s, is_last);
+            });
+        // Evolution's constructor is synchronous and has run to completion
+        // (streaming every batch through ProcessBatch) by the time this
+        // scope exits.
+    }
+    std::cout << "Timing phase=stream_all seconds=" << elapsed(t_stream) << "\n";
+
+    // --- 4. Cheap finalize pass: square + k-integrate the accumulated
+    // per-cutoff amplitude, then write output. No further kernel launches. ---
+    const auto &wlist = integrator.GetW();
+    const int n_t = setup.n_t;
+    auto t_finalize = Clock::now();
+    for (int i_t = 0; i_t < n_t; ++i_t) {
+        auto t_it = Clock::now();
+        if (save_amplitude) {
+            AmplitudeResult res = integrator.FinalizeAmplitude(i_t);
+            SaveAmplitudeResult(output_dir, i_t, res);
+        } else {
+            std::vector<double> spectrum = integrator.Finalize(i_t);
+            SaveStepResult(output_dir, i_t, wlist, spectrum);
+        }
+        std::cout << "Timing phase=finalize index=" << i_t
+                  << " seconds=" << elapsed(t_it) << "\n";
+    }
+    std::cout << "Timing phase=finalize_all count=" << n_t
+              << " seconds=" << elapsed(t_finalize) << "\n";
+
+    std::cout << "Total: " << elapsed(t_start) << " s\n";
+    return 0;
+
+#else
+    // --- 2. Run 2D Milne evolution (CPU GSL/Filon binaries: unchanged,
+    // full-history behavior — they don't have the GPU memory problem) ---
     auto t_evo = Clock::now();
     Evolution evo(setup);
     const auto &phi_snaps = evo.GetPhi();
@@ -87,16 +167,7 @@ int main(int argc, char *argv[]) {
 
     // --- 3. Run GW integration for each time index ---
     auto t_integrator_setup = Clock::now();
-#ifdef USE_GPU
-    if (filon_panels_per_osc < 2) {
-        std::cerr << "--filon-panels-per-osc must be at least 2\n";
-        return 1;
-    }
-    Integrator integrator(phi_snaps, setup, qual_param,
-                          filon_panels_per_osc);
-#else
     Integrator integrator(phi_snaps, setup, qual_param);
-#endif
     std::cout << "Timing phase=integrator_setup_total seconds="
               << elapsed(t_integrator_setup) << "\n";
     const auto &wlist = integrator.GetW();
@@ -140,4 +211,5 @@ int main(int argc, char *argv[]) {
 
     std::cout << "Total: " << elapsed(t_start) << " s\n";
     return 0;
+#endif
 }

@@ -1,5 +1,4 @@
 #include "gpu_integrator.cuh"
-#include "interpolator.h"
 
 #include <algorithm>
 #include <chrono>
@@ -111,10 +110,10 @@ __device__ __forceinline__ void d_filon_coeffs(double theta,
 // ---------------------------------------------------------------------------
 
 struct FStream {
-    double Se_c, Se_s;   // β sums (even-index, endpoint weight = 0.5)
-    double So_c, So_s;   // γ sums (odd-index)
-    double alpha_c;      //  gN*sin(wuN) - g0*sin(wu0)   → I_cos α term
-    double alpha_s;      //  g0*cos(wu0) - gN*cos(wuN)   → I_sin α term
+    double Se_c, Se_s;   // beta sums (even-index, endpoint weight = 0.5)
+    double So_c, So_s;   // gamma sums (odd-index)
+    double alpha_c;      //  gN*sin(wuN) - g0*sin(wu0)   -> I_cos alpha term
+    double alpha_s;      //  g0*cos(wu0) - gN*cos(wuN)   -> I_sin alpha term
 };
 
 __device__ __forceinline__ void fs_update(FStream &fs, int i, int N,
@@ -144,7 +143,7 @@ __device__ __forceinline__ void fs_result(const FStream &fs,
 // ---------------------------------------------------------------------------
 // N for one sub-interval: configurable panels per Bessel oscillation,
 // floor=n_floor
-// (default 8192, matching CPU Filon's FILON_N_MIN — see filon.h).
+// (default 8192, matching CPU Filon's FILON_N_MIN -- see filon.h).
 // Uses delta-ib = ib(b) - ib(a) so each segment is resolved independently.
 // ---------------------------------------------------------------------------
 
@@ -221,22 +220,27 @@ __device__ void filon_segment(
 }
 
 // ---------------------------------------------------------------------------
-// Incremental streaming Filon u-integral — split at t_cut/s to eliminate the
-// C² kink, dead zone removed (upper limit t_max/s, not 1+t_max/s), N from
+// Incremental streaming Filon u-integral -- split at t_cut/s to eliminate the
+// C^2 kink, dead zone removed (upper limit t_max/s, not 1+t_max/s), N from
 // delta-ib, same as the original filon_u. The difference: the plateau piece
 // [umin, u_split] doesn't depend on i_t (C1==1 there identically), so instead
 // of re-running Filon over the whole growing plateau every kernel launch
 // (time step), only the NEW slice since the previous launch's u_split
 // (t_cut_prev/s) is integrated and added into the persisted cum_re/cum_im
 // (references directly into this thread's slot of the device-resident
-// d_cumbuf_ — see GpuIntegrator::d_cumbuf_). The transition window
+// d_cumbuf_ -- see GpuIntegrator::d_cumbuf_). The transition window
 // [u_split, u_top] has fixed width and just slides in u as t_cut advances,
 // so it's still recomputed fresh every launch.
 //
 // Split into a zz-only and an xyz-only variant (rather than one templated
 // function) since each needs a different number/shape of cum_re/cum_im
-// arguments — mirrors the two distinct call shapes already used in
+// arguments -- mirrors the two distinct call shapes already used in
 // gw_kernel (one at s for zz, one at s_off for xx/yy/xz).
+//
+// NOTE: cum_re/cum_im here are per-batch (see GpuIntegrator::d_cumbuf_) --
+// they persist across cutoff-time calls WITHIN one ProcessBatch() call, and
+// are reset to 0 (along with t_cut_prev) at the start of every batch, since
+// each s belongs to exactly one batch.
 // ---------------------------------------------------------------------------
 
 __device__ void filon_zz_incremental(
@@ -341,22 +345,24 @@ __device__ void filon_xyz_incremental(
 }
 
 // ---------------------------------------------------------------------------
-// Main kernel — one thread per (i_w, i_k, i_s)
+// Main kernels -- one thread per (i_w, i_k, i_s_local) within the CURRENT
+// BATCH (i_s_local indexes into the batch's own arrays, size n_s <= max_alloc_,
+// not the full run's s-grid).
 //
-// Writes 6 linear per-s contributions to intbuf[i_w * n_k*n_s*6 + ...].
-// CPU finalization reduces over i_s and computes the nonlinear |re+i*im|^2.
-//
-// The plateau portion of the u-integral is carried across kernel launches
-// (time steps) in cumbuf — a persistent device buffer allocated once in
-// GpuIntegrator's constructor, NOT reset between calls (unlike intbuf, which
-// is scratch, memset every launch). Each thread owns a fixed 16-double slot
-// at cumbuf[idx*16 .. idx*16+15]; see GpuIntegrator::d_cumbuf_ for the layout.
+// i_s_start (always 1, passed explicitly for clarity at the call site) skips
+// local index 0 in EVERY batch: in batch 0 that's the true global s=0 sample
+// (no i_s-1 predecessor exists, matching the original code's unconditional
+// skip of the very first snapshot); in every later batch it's the halo slice
+// carried forward from the previous batch's last NEW slice, which was already
+// computed and folded into the caller's accumulator there. Either way, local
+// index 0 exists only to supply the i_s-1 reference for local index 1's
+// finite-difference derivative, never as an output point itself.
 // ---------------------------------------------------------------------------
 
 __global__ void precompute_z_kernel(
     const double * __restrict__ phi,     // [n_s * n_z]
     const double * __restrict__ phi2,    // [n_s * n_z]
-    int n_s, int n_z, int n_w, int n_k,
+    int n_s, int n_z, int n_w, int n_k, int i_s_start,
     double ds, double dz,
     const double * __restrict__ z_arr,   // [n_z]
     const double * __restrict__ w_arr,   // [n_w]
@@ -369,7 +375,7 @@ __global__ void precompute_z_kernel(
     int i_s = idx % n_s;
     int i_k = (idx / n_s) % n_k;
     int i_w = idx / (n_k * n_s);
-    if (i_s == 0) return;
+    if (i_s < i_s_start) return;
 
     const double w = w_arr[i_w];
     const double k = k_arr[i_k];
@@ -417,7 +423,7 @@ __global__ void precompute_z_kernel(
 }
 
 __global__ void gw_kernel(
-    int n_s, int n_w, int n_k,
+    int n_s, int n_w, int n_k, int i_s_start, bool is_last_batch,
     double ds,
     const double * __restrict__ w_arr,   // [n_w]
     const double * __restrict__ k_arr,   // [n_k]
@@ -427,10 +433,10 @@ __global__ void gw_kernel(
     int cutoff_type, int n_floor, int panels_per_oscillation,
     double t_cut_prev,
     double * __restrict__ intbuf,        // [n_w * n_k * n_s * 6]
-    double * __restrict__ cumbuf         // [n_w * n_k * n_s * 16] — persists across launches
+    double * __restrict__ cumbuf         // [n_w * n_k * n_s * 16] -- persists across cutoffs WITHIN one batch
 #ifdef GW_KERNEL_TIMING
     , long long * __restrict__ timebuf   // [n_w*n_k*n_s*5] per-thread cycle counts:
-                                          // [u_integral, zz, xa, xz, tail] — diagnostic
+                                          // [u_integral, zz, xa, xz, tail] -- diagnostic
                                           // build only, see Makefile's gpu_profile target.
 #endif
 ) {
@@ -440,10 +446,9 @@ __global__ void gw_kernel(
     int i_s = idx % n_s;
     int i_k = (idx / n_s) % n_k;
     int i_w = idx / (n_k * n_s);
+    if (i_s < i_s_start) return;   // subsumes the old "s == 0" first-sample skip
 
     double s = s_arr[i_s];
-    if (s == 0.) return;
-
     double w = w_arr[i_w];
     double k = k_arr[i_k];
     if (k == 1. || k == -1.) return;
@@ -457,15 +462,17 @@ __global__ void gw_kernel(
     double Sqrt1mkk = sqrt(Onemkk);
     double s_off    = s - 0.5 * ds;
 
-    // This thread's persistent cum slot — references bind straight to global
-    // memory, so += on these writes through immediately (no manual copy-back).
+    // This thread's persistent (per-batch) cum slot -- references bind
+    // straight to global memory, so += on these writes through immediately
+    // (no manual copy-back). Reset to 0 by the caller at the start of every
+    // ProcessBatch() call (see GpuIntegrator::ProcessBatch).
     double *c = cumbuf + idx * 16;
     double &cum_zz1_re = c[0],  &cum_zz1_im = c[1],  &cum_zz2_re = c[2],  &cum_zz2_im = c[3];
     double &cum_xx1_re = c[4],  &cum_xx1_im = c[5],  &cum_xx2_re = c[6],  &cum_xx2_im = c[7];
     double &cum_yy1_re = c[8],  &cum_yy1_im = c[9],  &cum_yy2_re = c[10], &cum_yy2_im = c[11];
     double &cum_xz1_re = c[12], &cum_xz1_im = c[13], &cum_xz2_re = c[14], &cum_xz2_im = c[15];
 
-    // --- u-integrals (incremental — see filon_zz_incremental/filon_xyz_incremental) ---
+    // --- u-integrals (incremental -- see filon_zz_incremental/filon_xyz_incremental) ---
     double zz_r1, zz_i1, zz_r2, zz_i2;
     filon_zz_incremental(s, Sqrt1mkk, w, -1., 1.,
                         t_cut, t_m, t_0, t_max, cutoff_type, n_floor,
@@ -513,8 +520,13 @@ __global__ void gw_kernel(
 #endif
 
     // --- Accumulate linear per-s contributions ---
-    double fac    = (i_s == 0 || i_s == n_s-1) ? 0.5 : 1.;
-    double pre_zz = fac * (double)i_s * (double)i_s * ds * ds * ds;
+    // fac's half-weight applies only to the single LAST slice of the WHOLE
+    // run (a trapezoidal-rule endpoint), not merely the last slice of this
+    // batch -- so it must gate on is_last_batch, not just i_s==n_s-1.
+    // pre_zz uses the physical s value (not the batch-local thread index
+    // i_s), since i_s is no longer a global index once batched.
+    double fac    = (is_last_batch && i_s == n_s-1) ? 0.5 : 1.;
+    double pre_zz = fac * s * s * ds;
     double pre_xa = 0.5 * s_off * s_off * ds;
     double pre_xz = -s_off * s_off * ds;
 
@@ -541,10 +553,10 @@ __global__ void gw_kernel(
 // Constructor
 // ---------------------------------------------------------------------------
 
-GpuIntegrator::GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
-                             const Setup &setup, int param,
-                             int panels_per_oscillation)
-    : n_k_(setup.n_k), n_w_(setup.n_w),
+GpuIntegrator::GpuIntegrator(const Setup &setup, int param,
+                             int panels_per_oscillation, int s_batch_size)
+    : n_k_(setup.n_k), n_w_(setup.n_w), n_z_(setup.z.size()),
+      n_t_(static_cast<std::size_t>(setup.n_t)),
       ds_(setup.ds * setup.how_often_ds),
       dz_(std::abs(setup.z[1] - setup.z[0])),
       t_cut_base_(setup.t_cut), t_m_base_(setup.t_m),
@@ -552,12 +564,28 @@ GpuIntegrator::GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
       d_(setup.d), cutoff_type_(setup.cutoff_type),
       z_(setup.z), wlist_(setup.wlist), times_(setup.times),
       param_floor_(param > 0 ? (param + 1) & ~1 : -1),
-      panels_per_oscillation_(panels_per_oscillation)
+      panels_per_oscillation_(panels_per_oscillation),
+      s_batch_size_(s_batch_size), max_alloc_(s_batch_size + 1)
 {
-    n_z_ = z_.size();
-    n_s_ = input_phi.size();
-    slist_ = linspace(0., (n_s_ - 1) * ds_, static_cast<int>(n_s_));
+    if (s_batch_size_ < 1)
+        throw std::runtime_error("GpuIntegrator: s_batch_size must be >= 1");
+
     klist_ = linspace(0., 1., static_cast<int>(n_k_));
+    accum_.assign(n_t_ * n_w_ * n_k_ * 6, 0.);
+
+    // --- Build the persistent phi0 interpolator directly from setup.phi0 ---
+    // (build_phi2's original logic only ever read input_phi[0], i.e. the t=0
+    // profile identical to setup.phi0 -- this has zero dependence on the
+    // evolved history, so it can be built once here instead of per-batch.)
+    auto max_it = std::max_element(setup.phi0.begin(), setup.phi0.end());
+    int phimid  = static_cast<int>(max_it - setup.phi0.begin());
+
+    z0_new_.assign(z_.begin() + phimid, z_.end());
+    double z0 = z0_new_[0];
+    for (double &zi : z0_new_) zi -= z0;
+
+    phi0_new_.assign(setup.phi0.begin() + phimid, setup.phi0.end());
+    phi0_interp_.emplace(z0_new_, phi0_new_);
 
     int dev;
     CUDA_CHECK(cudaGetDevice(&dev));
@@ -565,83 +593,41 @@ GpuIntegrator::GpuIntegrator(const std::vector<std::vector<double>> &input_phi,
     CUDA_CHECK(cudaGetDeviceProperties(&prop, dev));
     std::cout << "GpuIntegrator: device=" << prop.name
               << "  n_w=" << n_w_ << " n_k=" << n_k_
-              << " n_s=" << n_s_ << " n_z=" << n_z_
-              << "\n  intbuf=" << (n_w_*n_k_*n_s_*6*8)/(1<<20) << " MB\n\n";
+              << " n_z=" << n_z_ << " s_batch_size=" << s_batch_size_
+              << " (max_alloc=" << max_alloc_ << ")"
+              << "\n  per-batch zbuf/intbuf=" << (n_w_*n_k_*max_alloc_*6*8)/(1<<20)
+              << " MB  cumbuf=" << (n_w_*n_k_*max_alloc_*16*8)/(1<<20) << " MB\n\n";
 
-    // --- Flatten phi to host 1-D array, transposed to [iz * n_s + is] (see
-    // d_phi_'s declaration in the header for why) ---
-    auto t_flatten = std::chrono::steady_clock::now();
-    std::vector<double> phi_host(n_s_ * n_z_);
-    for (std::size_t is = 0; is < n_s_; ++is)
-        for (std::size_t iz = 0; iz < n_z_; ++iz)
-            phi_host[iz * n_s_ + is] = input_phi[is][iz];
-    std::cout << "Timing phase=gpu_host_field_flatten seconds="
-              << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_flatten).count()
-              << "\n";
-
-    // --- Build phi2 on host ---
-    auto t_phi2 = std::chrono::steady_clock::now();
-    std::vector<double> phi2_host;
-    build_phi2(input_phi, phi2_host);
-    std::cout << "Timing phase=gpu_reference_field seconds="
-              << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_phi2).count()
-              << "\n";
-
-    // --- Upload to device ---
+    // --- Allocate persistent device buffers ONCE, sized for max_alloc_ ---
+    // (batch-sized, not full-s-grid-sized) and reused for every ProcessBatch()
+    // call -- no per-batch cudaMalloc/cudaFree.
     auto t_device_setup = std::chrono::steady_clock::now();
-    auto alloc_and_copy = [&](double **dptr, const std::vector<double> &hv) {
-        CUDA_CHECK(cudaMalloc(dptr, hv.size() * sizeof(double)));
-        CUDA_CHECK(cudaMemcpy(*dptr, hv.data(),
-                              hv.size() * sizeof(double),
-                              cudaMemcpyHostToDevice));
-    };
 
-    alloc_and_copy(&d_phi_,  phi_host);
-    alloc_and_copy(&d_phi2_, phi2_host);
-    alloc_and_copy(&d_z_,    z_);
-    alloc_and_copy(&d_w_,    wlist_);
-    alloc_and_copy(&d_k_,    klist_);
-    alloc_and_copy(&d_s_,    slist_);
+    CUDA_CHECK(cudaMalloc(&d_phi_,  n_z_ * max_alloc_ * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_phi2_, n_z_ * max_alloc_ * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_s_,    max_alloc_ * sizeof(double)));
 
-    const std::size_t total = n_w_ * n_k_ * n_s_;
-    CUDA_CHECK(cudaMalloc(&d_zbuf_, total * 6 * sizeof(double)));
-    CUDA_CHECK(cudaMemset(d_zbuf_, 0, total * 6 * sizeof(double)));
-    constexpr int PRECOMPUTE_BLOCK = 256;
-    const int precompute_grid =
-        (static_cast<int>(total) + PRECOMPUTE_BLOCK - 1) / PRECOMPUTE_BLOCK;
-    const auto t_z_precompute = std::chrono::steady_clock::now();
-    precompute_z_kernel<<<precompute_grid, PRECOMPUTE_BLOCK>>>(
-        d_phi_, d_phi2_, static_cast<int>(n_s_), static_cast<int>(n_z_),
-        static_cast<int>(n_w_), static_cast<int>(n_k_), ds_, dz_,
-        d_z_, d_w_, d_k_, d_zbuf_);
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-    std::cout << "Timing phase=gpu_z_precompute seconds="
-              << std::chrono::duration<double>(
-                     std::chrono::steady_clock::now() - t_z_precompute).count()
-              << "\n";
+    CUDA_CHECK(cudaMalloc(&d_z_, n_z_ * sizeof(double)));
+    CUDA_CHECK(cudaMemcpy(d_z_, z_.data(), n_z_ * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMalloc(&d_w_, n_w_ * sizeof(double)));
+    CUDA_CHECK(cudaMemcpy(d_w_, wlist_.data(), n_w_ * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMalloc(&d_k_, n_k_ * sizeof(double)));
+    CUDA_CHECK(cudaMemcpy(d_k_, klist_.data(), n_k_ * sizeof(double), cudaMemcpyHostToDevice));
 
-    // The time-dependent kernels now consume only zbuf, so release the much
-    // larger field histories immediately after the one-time z transform.
-    CUDA_CHECK(cudaFree(d_phi_));  d_phi_ = nullptr;
-    CUDA_CHECK(cudaFree(d_phi2_)); d_phi2_ = nullptr;
-    CUDA_CHECK(cudaFree(d_z_));    d_z_ = nullptr;
+    const std::size_t batch_total = n_w_ * n_k_ * static_cast<std::size_t>(max_alloc_);
+    CUDA_CHECK(cudaMalloc(&d_zbuf_,   batch_total * 6  * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_intbuf_, batch_total * 6  * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_cumbuf_, batch_total * 16 * sizeof(double)));
 
-    CUDA_CHECK(cudaMalloc(&d_intbuf_, n_w_ * n_k_ * n_s_ * 6 * sizeof(double)));
-
-    // Persistent plateau-accumulator buffer: allocated once, zeroed once, and
-    // NOT reset between Compute() calls (unlike d_intbuf_ above) — each
-    // thread's slot carries the running plateau integral forward across time
-    // steps. See gw_kernel's cumbuf usage and d_cumbuf_'s declaration.
-    CUDA_CHECK(cudaMalloc(&d_cumbuf_, n_w_ * n_k_ * n_s_ * 16 * sizeof(double)));
-    CUDA_CHECK(cudaMemset(d_cumbuf_, 0, n_w_ * n_k_ * n_s_ * 16 * sizeof(double)));
-    CUDA_CHECK(cudaDeviceSynchronize());
+    size_t free_b, total_b;
+    CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
     std::cout << "Timing phase=gpu_device_setup seconds="
               << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_device_setup).count()
-              << "\n";
+              << "\nGPU memory after setup: free=" << free_b/(1<<20)
+              << " MB  total=" << total_b/(1<<20) << " MB\n";
 
 #ifdef GW_KERNEL_TIMING
-    CUDA_CHECK(cudaMalloc(&d_timebuf_, n_w_ * n_k_ * n_s_ * 5 * sizeof(long long)));
+    CUDA_CHECK(cudaMalloc(&d_timebuf_, batch_total * 5 * sizeof(long long)));
 #endif
 }
 
@@ -666,123 +652,184 @@ GpuIntegrator::~GpuIntegrator()
 }
 
 // ---------------------------------------------------------------------------
-// Compute / ComputeAmplitude — thin wrappers over the shared launch+reduce
-// path in RunAndReduce().
+// phi2 construction, per batch (CPU) -- reuses the persistent phi0_interp_
+// built once in the constructor; the math is otherwise identical to the
+// original build_phi2 (cu, pre-rewrite), just evaluated over the batch's own
+// s values instead of the full [0, n_s) range.
 // ---------------------------------------------------------------------------
 
-std::vector<double> GpuIntegrator::Compute(int i_t)
+void GpuIntegrator::build_phi2_batch(const std::vector<double> &batch_s,
+                                      std::vector<double> &phi2_host) const
 {
-    return RunAndReduce(i_t, nullptr, nullptr);
-}
-
-AmplitudeResult GpuIntegrator::ComputeAmplitude(int i_t)
-{
-    AmplitudeResult res;
-    res.w      = wlist_;
-    res.klist  = klist_;
-    res.amp_re.assign(n_w_ * n_k_, 0.);
-    res.amp_im.assign(n_w_ * n_k_, 0.);
-    res.spectrum = RunAndReduce(i_t, &res.amp_re, &res.amp_im);
-    return res;
-}
-
-// ---------------------------------------------------------------------------
-// RunAndReduce — launch kernel, then reduce on CPU
-//
-// The plateau portion of the u-integral is accumulated incrementally across
-// calls in device memory (d_cumbuf_, allocated once in the constructor), so
-// this mutates persisted state and must be called with strictly increasing
-// i_t starting at 0.
-// ---------------------------------------------------------------------------
-
-std::vector<double> GpuIntegrator::RunAndReduce(int i_t,
-                                                 std::vector<double> *out_amp_re,
-                                                 std::vector<double> *out_amp_im)
-{
-    if (i_t != last_i_t_processed_ + 1) {
-        throw std::runtime_error(
-            "GpuIntegrator::RunAndReduce: i_t must be called in strictly "
-            "increasing order starting at 0 (plateau u-integral is "
-            "accumulated incrementally in device memory); got i_t=" +
-            std::to_string(i_t) + " after last_i_t_processed_=" +
-            std::to_string(last_i_t_processed_));
+    const std::size_t n_batch = batch_s.size();
+    phi2_host.resize(n_batch * n_z_);
+    for (std::size_t is = 0; is < n_batch; ++is) {
+        double s_val = batch_s[is];
+        for (std::size_t iz = 0; iz < n_z_; ++iz) {
+            double z_val = iz * dz_;
+            double r1 = std::sqrt(s_val*s_val + (z_val - d_/2.)*(z_val - d_/2.));
+            double r2 = std::sqrt(s_val*s_val + (z_val + d_/2.)*(z_val + d_/2.));
+            phi2_host[iz * n_batch + is] = (*phi0_interp_)(r1) + (*phi0_interp_)(r2);
+        }
     }
+}
 
-    double shift  = t_m_base_  - times_[i_t];
-    double t_cut  = t_cut_base_ - shift;
-    double t_m    = t_m_base_   - shift;
-    double t_max  = t_max_base_ - shift;
-    const double t_cut_prev = t_cut_prev_;
+// ---------------------------------------------------------------------------
+// ProcessBatch -- uploads one batch (<= max_alloc_ slices, index 0 being the
+// halo slice for every batch after the first), computes this batch's
+// z-integrals once, then loops ALL cutoff times internally (the incremental
+// plateau/transition-window algorithm is preserved exactly, just scoped to
+// this batch's cum state instead of the whole run's), folding each cutoff's
+// linear contribution into the persistent, batch-independent accum_.
+// ---------------------------------------------------------------------------
+
+void GpuIntegrator::ProcessBatch(const std::vector<std::vector<double>> &batch_phi,
+                                 const std::vector<double> &batch_s,
+                                 bool is_first_batch, bool is_last_batch)
+{
+    if (finalized_)
+        throw std::runtime_error(
+            "GpuIntegrator::ProcessBatch called after the last batch was already processed");
+
+    const int n_s_local = static_cast<int>(batch_phi.size());
+    if (n_s_local < 1 || n_s_local > max_alloc_)
+        throw std::runtime_error(
+            "GpuIntegrator::ProcessBatch: batch size " + std::to_string(n_s_local) +
+            " out of range (1.." + std::to_string(max_alloc_) + ")");
+
+    // Local index 0 is ALWAYS skipped as an output/accumulation point,
+    // regardless of is_first_batch: in batch 0 it's the true global s=0
+    // sample (no i_s-1 predecessor exists, so no s-derivative can be formed
+    // -- matches the original unconditional "if (i_s==0) return"/"if (s==0)
+    // return" checks); in every later batch it's the halo slice carried
+    // forward from the previous batch's last NEW slice, which was already
+    // computed and folded into accum_ there -- reprocessing it here would
+    // double-count it. Either way, its only purpose here is to supply the
+    // i_s-1 reference for local index 1's finite-difference derivative.
+    // A batch with n_s_local==1 (only the halo/initial slice) legitimately
+    // contributes nothing -- the loops below over i_s in [1, n_s_local) are
+    // simply empty in that case.
+    const int i_s_start = 1;
+
+    const auto t_batch = std::chrono::steady_clock::now();
+
+    // --- Flatten phi to host 1-D array, transposed to [iz*n_s_local+is] ---
+    std::vector<double> phi_host(static_cast<std::size_t>(n_s_local) * n_z_);
+    for (int is = 0; is < n_s_local; ++is)
+        for (std::size_t iz = 0; iz < n_z_; ++iz)
+            phi_host[iz * n_s_local + is] = batch_phi[is][iz];
+
+    // --- Build phi2 for this batch on the host ---
+    std::vector<double> phi2_host;
+    build_phi2_batch(batch_s, phi2_host);
+
+    // --- Upload this batch's phi/phi2/s (reusing the persistent buffers) ---
+    CUDA_CHECK(cudaMemcpy(d_phi_,  phi_host.data(),  phi_host.size()  * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_phi2_, phi2_host.data(), phi2_host.size() * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_s_,    batch_s.data(),   batch_s.size()   * sizeof(double), cudaMemcpyHostToDevice));
+
+    const std::size_t total = n_w_ * n_k_ * static_cast<std::size_t>(n_s_local);
+    constexpr int BLOCK = 256;
+    const int grid = (static_cast<int>(total) + BLOCK - 1) / BLOCK;
+
+    // --- z-integrals for this batch only ---
+    CUDA_CHECK(cudaMemset(d_zbuf_, 0, total * 6 * sizeof(double)));
+    precompute_z_kernel<<<grid, BLOCK>>>(
+        d_phi_, d_phi2_, n_s_local, static_cast<int>(n_z_),
+        static_cast<int>(n_w_), static_cast<int>(n_k_), i_s_start,
+        ds_, dz_, d_z_, d_w_, d_k_, d_zbuf_);
+    CUDA_CHECK(cudaGetLastError());
+
+    // --- Reset this batch's incremental plateau state ---
+    // (each s belongs to exactly one batch -- cum state must NOT persist
+    // across batches, only across the cutoff-time loop within this one)
+    CUDA_CHECK(cudaMemset(d_cumbuf_, 0, total * 16 * sizeof(double)));
+    t_cut_prev_ = kNegInfSentinel;
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     n_floor_ = param_floor_ > 0 ? param_floor_ : 8192;
 
-    std::cout << "GpuIntegrator::RunAndReduce i_t=" << i_t
-              << " shift=" << shift << " t_m=" << t_m
-              << " n_floor=" << n_floor_
-              << " panels_per_osc=" << panels_per_oscillation_
-              << (out_amp_re ? "  (amplitude)" : "") << "\n";
+    std::vector<double> buf(total * 6);
+    double kernel_seconds = 0., transfer_seconds = 0., reduce_seconds = 0.;
 
-    const auto t_all = std::chrono::steady_clock::now();
-    std::size_t total = n_w_ * n_k_ * n_s_;
-    CUDA_CHECK(cudaMemset(d_intbuf_, 0, total * 6 * sizeof(double)));
+    for (std::size_t i_t = 0; i_t < n_t_; ++i_t) {
+        const auto t_kernel = std::chrono::steady_clock::now();
 
-    constexpr int BLOCK = 256;
-    int grid = (static_cast<int>(total) + BLOCK - 1) / BLOCK;
+        double shift  = t_m_base_  - times_[i_t];
+        double t_cut  = t_cut_base_ - shift;
+        double t_m    = t_m_base_   - shift;
+        double t_max  = t_max_base_ - shift;
 
-    gw_kernel<<<grid, BLOCK>>>(
-        static_cast<int>(n_s_),
-        static_cast<int>(n_w_), static_cast<int>(n_k_),
-        ds_, d_w_, d_k_, d_s_, d_zbuf_,
-        t_cut, t_m, t_0_, t_max,
-        cutoff_type_, n_floor_, panels_per_oscillation_, t_cut_prev,
-        d_intbuf_, d_cumbuf_
+        CUDA_CHECK(cudaMemset(d_intbuf_, 0, total * 6 * sizeof(double)));
+        gw_kernel<<<grid, BLOCK>>>(
+            n_s_local, static_cast<int>(n_w_), static_cast<int>(n_k_),
+            i_s_start, is_last_batch,
+            ds_, d_w_, d_k_, d_s_, d_zbuf_,
+            t_cut, t_m, t_0_, t_max,
+            cutoff_type_, n_floor_, panels_per_oscillation_, t_cut_prev_,
+            d_intbuf_, d_cumbuf_
 #ifdef GW_KERNEL_TIMING
-        , d_timebuf_
+            , d_timebuf_
 #endif
-    );
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-    const auto t_kernel_done = std::chrono::steady_clock::now();
+        );
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+        kernel_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_kernel).count();
 
-#ifdef GW_KERNEL_TIMING
-    // Diagnostic-build-only: sum clock64() cycles per phase across all
-    // threads and print the relative breakdown. Since the z-integral loops
-    // run a fixed n_z iterations regardless of thread, and the sum (rather
-    // than max) is a standard proxy for "how much this phase matters" when
-    // per-phase costs are reasonably uniform across threads, this is a rough
-    // but honest proportional breakdown, not a precise wall-clock accounting.
-    {
-        std::vector<long long> tbuf(total * 5);
-        CUDA_CHECK(cudaMemcpy(tbuf.data(), d_timebuf_,
-                              tbuf.size() * sizeof(long long),
-                              cudaMemcpyDeviceToHost));
-        long long sums[5] = {0, 0, 0, 0, 0};
-        for (std::size_t i = 0; i < total; ++i)
-            for (int p = 0; p < 5; ++p)
-                sums[p] += tbuf[i * 5 + p];
-        long long grand_total = sums[0] + sums[1] + sums[2] + sums[3] + sums[4];
-        static const char *names[5] = {"u_integral", "zz_loop", "xa_loop", "xz_loop", "tail"};
-        std::cout << "  [timing breakdown, i_t=" << i_t << "]";
-        if (grand_total > 0) {
-            for (int p = 0; p < 5; ++p) {
-                double pct = 100.0 * static_cast<double>(sums[p])
-                                   / static_cast<double>(grand_total);
-                std::cout << "  " << names[p] << "=" << pct << "%";
+        const auto t_transfer = std::chrono::steady_clock::now();
+        CUDA_CHECK(cudaMemcpy(buf.data(), d_intbuf_, buf.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        transfer_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_transfer).count();
+
+        const auto t_reduce = std::chrono::steady_clock::now();
+        double *acc = &accum_[i_t * n_w_ * n_k_ * 6];
+        for (std::size_t iw = 0; iw < n_w_; ++iw) {
+            for (std::size_t ik = 0; ik < n_k_; ++ik) {
+                double sums[6] = {0., 0., 0., 0., 0., 0.};
+                for (int is = i_s_start; is < n_s_local; ++is) {
+                    std::size_t base = (iw * n_k_ * n_s_local + ik * n_s_local + is) * 6;
+                    for (int c = 0; c < 6; ++c) sums[c] += buf[base + c];
+                }
+                double *dst = &acc[(iw * n_k_ + ik) * 6];
+                for (int c = 0; c < 6; ++c) dst[c] += sums[c];
             }
         }
-        std::cout << "\n";
-    }
-#endif
+        reduce_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_reduce).count();
 
-    // --- Copy intermediate buffer back and reduce on CPU ---
-    std::vector<double> buf(total * 6);
-    const auto t_transfer_start = std::chrono::steady_clock::now();
-    CUDA_CHECK(cudaMemcpy(buf.data(), d_intbuf_,
-                          buf.size() * sizeof(double),
-                          cudaMemcpyDeviceToHost));
-    const auto t_transfer_done = std::chrono::steady_clock::now();
+        t_cut_prev_ = t_cut;
+    }
+
+    std::cout << "Timing phase=batch size=" << n_s_local
+              << " is_first=" << is_first_batch << " is_last=" << is_last_batch
+              << " kernel_seconds=" << kernel_seconds
+              << " transfer_seconds=" << transfer_seconds
+              << " reduction_seconds=" << reduce_seconds
+              << " total_seconds=" << std::chrono::duration<double>(std::chrono::steady_clock::now() - t_batch).count()
+              << "\n";
+
+    if (is_last_batch)
+        finalized_ = true;
+}
+
+// ---------------------------------------------------------------------------
+// Finalize / FinalizeAmplitude -- pure CPU reads of accum_, no kernel launch.
+// Combines the 6 linear totals (summed over every batch's local i_s) into
+// re/im, THEN squares and k-integrates -- identical math to the original
+// RunAndReduce's tail, just reading from the persistent accumulator instead
+// of a freshly-copied full-s-grid intbuf.
+// ---------------------------------------------------------------------------
+
+std::vector<double> GpuIntegrator::FinalizeImpl(int i_t,
+                                                std::vector<double> *out_amp_re,
+                                                std::vector<double> *out_amp_im) const
+{
+    if (!finalized_)
+        throw std::runtime_error(
+            "GpuIntegrator::Finalize called before the last batch was processed");
+    if (i_t < 0 || static_cast<std::size_t>(i_t) >= n_t_)
+        throw std::runtime_error("GpuIntegrator::Finalize: i_t out of range");
 
     const double dk = klist_[1] - klist_[0];
+    const double *acc = &accum_[static_cast<std::size_t>(i_t) * n_w_ * n_k_ * 6];
 
     std::vector<double> spectrum(n_w_, 0.);
 
@@ -795,20 +842,10 @@ std::vector<double> GpuIntegrator::RunAndReduce(int i_t,
             double Onemkk = 1. - k*k;
             double TwokSq = 2. * k * std::sqrt(Onemkk);
 
-            // Reduce over i_s for this (iw, ik)
-            double szz_r = 0., szz_i = 0.;
-            double sxa_r = 0., sxa_i = 0.;
-            double sxz_r = 0., sxz_i = 0.;
-
-            for (std::size_t is = 0; is < n_s_; ++is) {
-                std::size_t base = (iw * n_k_ * n_s_ + ik * n_s_ + is) * 6;
-                szz_r += buf[base + 0];
-                szz_i += buf[base + 1];
-                sxa_r += buf[base + 2];
-                sxa_i += buf[base + 3];
-                sxz_r += buf[base + 4];
-                sxz_i += buf[base + 5];
-            }
+            const double *s6 = &acc[(iw * n_k_ + ik) * 6];
+            double szz_r = s6[0], szz_i = s6[1];
+            double sxa_r = s6[2], sxa_i = s6[3];
+            double sxz_r = s6[4], sxz_i = s6[5];
 
             double re = szz_r*Onemkk + sxa_r - TwokSq*sxz_r;
             double im = szz_i*Onemkk + sxa_i - TwokSq*sxz_i;
@@ -825,50 +862,23 @@ std::vector<double> GpuIntegrator::RunAndReduce(int i_t,
         spectrum[iw] = int_k;
     }
 
-    t_cut_prev_ = t_cut;
-    last_i_t_processed_ = i_t;
-    const auto t_reduce_done = std::chrono::steady_clock::now();
-    const auto seconds_between = [](auto a, auto b) {
-        return std::chrono::duration<double>(b - a).count();
-    };
-    std::cout << "Timing phase=gpu_cutoff index=" << i_t
-              << " kernel_seconds=" << seconds_between(t_all, t_kernel_done)
-              << " transfer_seconds=" << seconds_between(t_transfer_start, t_transfer_done)
-              << " reduction_seconds=" << seconds_between(t_transfer_done, t_reduce_done)
-              << " total_seconds=" << seconds_between(t_all, t_reduce_done)
-              << "\n";
     return spectrum;
 }
 
-// ---------------------------------------------------------------------------
-// phi2 construction (CPU — runs once in constructor)
-// ---------------------------------------------------------------------------
-
-void GpuIntegrator::build_phi2(const std::vector<std::vector<double>> &input_phi,
-                                std::vector<double> &phi2_host) const
+std::vector<double> GpuIntegrator::Finalize(int i_t) const
 {
-    auto max_it = std::max_element(input_phi[0].begin(), input_phi[0].end());
-    int phimid  = static_cast<int>(max_it - input_phi[0].begin());
+    return FinalizeImpl(i_t, nullptr, nullptr);
+}
 
-    std::vector<double> z_new(z_.begin() + phimid, z_.end());
-    double z0 = z_new[0];
-    for (double &zi : z_new) zi -= z0;
-
-    std::vector<double> phi0_new(input_phi[0].begin() + phimid,
-                                 input_phi[0].end());
-    Interpolator phi0_interp(z_new, phi0_new);
-
-    // Transposed to [iz * n_s + is] to match d_phi_'s layout (see header).
-    phi2_host.resize(n_s_ * n_z_);
-    for (std::size_t is = 0; is < n_s_; ++is) {
-        double s_val = is * ds_;
-        for (std::size_t iz = 0; iz < n_z_; ++iz) {
-            double z_val = iz * dz_;
-            double r1 = std::sqrt(s_val*s_val + (z_val - d_/2.)*(z_val - d_/2.));
-            double r2 = std::sqrt(s_val*s_val + (z_val + d_/2.)*(z_val + d_/2.));
-            phi2_host[iz * n_s_ + is] = phi0_interp(r1) + phi0_interp(r2);
-        }
-    }
+AmplitudeResult GpuIntegrator::FinalizeAmplitude(int i_t) const
+{
+    AmplitudeResult res;
+    res.w      = wlist_;
+    res.klist  = klist_;
+    res.amp_re.assign(n_w_ * n_k_, 0.);
+    res.amp_im.assign(n_w_ * n_k_, 0.);
+    res.spectrum = FinalizeImpl(i_t, &res.amp_re, &res.amp_im);
+    return res;
 }
 
 // ---------------------------------------------------------------------------

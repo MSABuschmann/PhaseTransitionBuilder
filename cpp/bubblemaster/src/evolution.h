@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -10,12 +11,29 @@ class Evolution {
 public:
     explicit Evolution(const Setup &setup);
 
+    // Called once per saved snapshot, in increasing-s order (including the
+    // initial s=0 snapshot). `is_last` is true exactly once, on the final
+    // snapshot that will ever be saved for this run — computed up front from
+    // n_steps/how_often_ds, so the caller doesn't need foreknowledge of the
+    // total snapshot count.
+    //
+    // Streaming construction: does NOT populate phicomplete/slist (they stay
+    // empty) — GetPhi()/GetSlist() must not be called on an instance built
+    // this way. Used only by the GPU binary's bounded-memory batching path;
+    // the physics recurrence itself is unchanged (Evolve() only ever reads
+    // the *current* phi/pi arrays, never past snapshots).
+    using SnapshotSink =
+        std::function<void(const std::vector<double> &phi, double s, bool is_last)>;
+    Evolution(const Setup &setup, SnapshotSink sink);
+
     // Returns the saved field snapshots: phicomplete[i_s][i_z]
     const std::vector<std::vector<double>> &GetPhi()   const { return phicomplete; }
     const std::vector<double>              &GetSlist()  const { return slist; }
     double                                  GetDS()     const { return ds_out; }
 
 private:
+    Evolution(const Setup &setup, SnapshotSink sink, bool);  // delegate target
+
     void Evolve();
     void EvolvepiFirstHalfStep(int n_baby);
     double EvolvePi(int i_z, double s, double step) const;
@@ -34,4 +52,7 @@ private:
     std::vector<std::vector<double>> phicomplete;
 
     double ds_out; // effective ds between saved snapshots = ds * how_often_ds
+
+    SnapshotSink sink_;
+    int last_saved_i_ = 0;   // = (n_steps/how_often_ds)*how_often_ds
 };

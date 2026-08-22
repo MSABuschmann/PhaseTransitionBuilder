@@ -10,18 +10,33 @@
 // ---------------------------------------------------------------------------
 
 Evolution::Evolution(const Setup &setup)
+    : Evolution(setup,
+                [this](const std::vector<double> &snap, double s, bool) {
+                    phicomplete.push_back(snap);
+                    slist.push_back(s);
+                },
+                true)
+{}
+
+Evolution::Evolution(const Setup &setup, SnapshotSink sink)
+    : Evolution(setup, std::move(sink), true)
+{}
+
+Evolution::Evolution(const Setup &setup, SnapshotSink sink, bool)
     : n_z(setup.n_z), how_often_ds(setup.how_often_ds),
       baby_steps(setup.baby_steps), ds(setup.ds), smax(setup.smax),
       dz(std::abs(setup.z[1] - setup.z[0])), d(setup.d),
-      potential(setup.potential.get()), z(setup.z), phi(setup.phi0)
+      potential(setup.potential.get()), z(setup.z), phi(setup.phi0),
+      sink_(std::move(sink))
 {
     n_steps = static_cast<int>(std::round(smax / ds));
     if (n_steps < 1) n_steps = 1;
+    last_saved_i_ = (n_steps / how_often_ds) * how_often_ds;
 
     pi.resize(n_z, 0.);
-    phicomplete.push_back(phi);
-    slist.push_back(0.);
     ds_out = ds * how_often_ds;
+
+    sink_(phi, 0., last_saved_i_ == 0);
 
     Evolve();
 }
@@ -89,9 +104,7 @@ void Evolution::Evolve() {
             phi[i_z] += ds * pi[i_z];
 
         // Save snapshot every how_often_ds steps
-        if (i % how_often_ds == 0) {
-            phicomplete.push_back(phi);
-            slist.push_back(i * ds);
-        }
+        if (i % how_often_ds == 0)
+            sink_(phi, i * ds, i == last_saved_i_);
     }
 }
