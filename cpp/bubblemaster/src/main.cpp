@@ -1,5 +1,9 @@
 #include <chrono>
+#include <filesystem>
+#include <iomanip>
 #include <iostream>
+#include <optional>
+#include <sstream>
 #include <string>
 
 #include "evolution.h"
@@ -7,6 +11,7 @@
 #include "setup.h"
 
 #ifdef USE_GPU
+#  include "checkpoint_io.h"
 #  include "gpu_integrator.cuh"
 #  include "s_batch_window.h"
 #elif defined(USE_FILON)
@@ -35,11 +40,18 @@ int main(int argc, char *argv[]) {
     if (argc < 3) {
         std::cerr << "Usage: bubblemaster <setup.h5> <output_dir/>"
                      " [--save-fields] [--save-amplitude] [--param N]"
-                     " [--filon-panels-per-osc N] [--s-batch-size N]\n"
+                     " [--filon-panels-per-osc N] [--s-batch-size N]"
+                     " [--overwrite] [--checkpoint-interval-minutes N]\n"
                      "  --param N         Filon: N_min panels; GSL: subinterval limit\n"
                      "  --filon-panels-per-osc N  GPU Filon panels per Bessel oscillation\n"
                      "  --s-batch-size N  GPU only: s-slices streamed per batch (default 128)\n"
-                     "  --save-amplitude  Also write Re/Im A(w,cos_theta) to result files\n";
+                     "  --save-amplitude  Also write Re/Im A(w,cos_theta) to result files\n"
+                     "  --overwrite       GPU only: ignore/discard any existing results or\n"
+                     "                    checkpoint in output_dir/ and start this row fresh\n"
+                     "                    (default: auto-detect and resume/extend instead --\n"
+                     "                    see GpuIntegrator's Checkpoint/StreamCheckpoint)\n"
+                     "  --checkpoint-interval-minutes N  GPU only: how often to write a\n"
+                     "                    mid-stream progress checkpoint (default 10)\n";
         return 1;
     }
 
@@ -49,7 +61,9 @@ int main(int argc, char *argv[]) {
     bool save_amplitude = false;
     int  qual_param     = -1;   // -1 → use compiled default
     int  filon_panels_per_osc = 64;
-    int  s_batch_size   = 128;  // locked production value -- see AI_HANDOFF.md
+    int  s_batch_size   = 128;  // locked production value
+    bool overwrite      = false;
+    double checkpoint_interval_minutes = 10.0;
     for (int i = 3; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--save-fields")
@@ -62,6 +76,10 @@ int main(int argc, char *argv[]) {
             filon_panels_per_osc = std::atoi(argv[++i]);
         else if (a == "--s-batch-size" && i + 1 < argc)
             s_batch_size = std::atoi(argv[++i]);
+        else if (a == "--overwrite")
+            overwrite = true;
+        else if (a == "--checkpoint-interval-minutes" && i + 1 < argc)
+            checkpoint_interval_minutes = std::atof(argv[++i]);
     }
 
     std::cout << "Setup:  " << setup_path << "\n";
@@ -80,8 +98,7 @@ int main(int argc, char *argv[]) {
 #ifdef USE_GPU
     // The streaming GPU integrator keeps device (and evolution) memory
     // bounded by processing the field history in batches of s-slices rather
-    // than holding the complete history at once (see AI_HANDOFF.md's
-    // "Planned minimal-memory GPU rewrite"). --save-fields dumps the
+    // than holding the complete history at once. --save-fields dumps the
     // complete history to disk, which is exactly what this design avoids
     // ever materializing -- so it's a hard error here rather than silently
     // reintroducing O(n_s*n_z) memory. Use the CPU binary for field dumps.
@@ -101,22 +118,138 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    namespace fs = std::filesystem;
+    H5::Exception::dontPrint();   // has_plateau_checkpoint/try_read_stream_checkpoint
+                                   // deliberately probe for missing/corrupt files via
+                                   // try/catch -- don't spam stderr with HDF5's default
+                                   // auto-printed error trace for the expected-miss case.
+
+    auto result_path_for = [&](int i_t) {
+        std::ostringstream oss;
+        oss << output_dir << "result_" << std::setfill('0') << std::setw(4) << i_t << ".h5";
+        return oss.str();
+    };
+
+    const int n_t_total = setup.n_t;
+
+    // --- Auto-detect what's already in output_dir/ ---
+    // --overwrite discards it all and starts this row completely fresh.
+    // Otherwise: k_done = how many of this row's cutoff times already have a
+    // result file, counted contiguously from index 0 (result files are only
+    // ever written as a complete, ordered set by the finalize loop below, or
+    // not written at all if interrupted first -- see the Format-B carve-out
+    // just below for the case where finalize itself was interrupted).
+    int k_done = 0;
+    if (overwrite) {
+        if (fs::exists(output_dir)) {
+            for (const auto &entry : fs::directory_iterator(output_dir)) {
+                const std::string fname = entry.path().filename().string();
+                if (fname.rfind("result_", 0) == 0 || fname == "checkpoint.h5")
+                    fs::remove(entry.path());
+            }
+        }
+    } else {
+        for (int i = 0; i < n_t_total; ++i) {
+            if (fs::exists(result_path_for(i))) k_done = i + 1;
+            else break;
+        }
+    }
+
+    if (k_done == n_t_total) {
+        std::cout << "All " << n_t_total << " cutoff times already have a result in "
+                  << output_dir << " -- nothing to do (pass --overwrite to redo).\n";
+        return 0;
+    }
+
+    // times_local is what THIS run needs to compute -- computed from the
+    // full setup.times BEFORE truncating it below.
+    const std::vector<double> times_local(setup.times.begin() + k_done, setup.times.end());
+    const std::string checkpoint_path = output_dir + "checkpoint.h5";
+
+    // --- Format A seed: extend an already-completed prefix of this row ---
+    std::optional<GpuIntegrator::Checkpoint> seed;
+    if (!overwrite && k_done > 0) {
+        const std::string last_result_path = result_path_for(k_done - 1);
+        if (!has_plateau_checkpoint(last_result_path))
+            throw std::runtime_error(
+                "main: " + last_result_path + " has no plateau checkpoint to extend "
+                "from -- was it produced by an older build, or with the CPU binary?");
+
+        // Hard-require the OLD frequency grid: extending a row must reuse
+        // its original wlist unchanged, not one freshly recomputed for a
+        // possibly-different GAMMA_STAR_MAX. GpuIntegrator's own seed check
+        // only compares vector SIZE (n_w*n_k), which a same-size but
+        // shifted grid would pass silently -- this compares actual values.
+        const std::vector<double> prior_wlist = read_result_wlist(last_result_path);
+        bool wlist_matches = prior_wlist.size() == setup.wlist.size();
+        for (std::size_t i = 0; wlist_matches && i < prior_wlist.size(); ++i)
+            wlist_matches = std::abs(prior_wlist[i] - setup.wlist[i])
+                          <= 1e-9 * std::max(1.0, std::abs(prior_wlist[i]));
+        if (!wlist_matches)
+            throw std::runtime_error(
+                "main: setup.h5's wlist does not match " + last_result_path +
+                "'s own wlist -- extending a row must reuse its ORIGINAL frequency "
+                "grid unchanged, not a freshly recomputed one.");
+
+        seed = read_plateau_checkpoint(last_result_path);
+        std::cout << "Seeding from " << last_result_path
+                  << "  (seed_time=" << seed->seed_time << ")\n";
+    }
+
+    // --- Format B resume: was a previous attempt at THIS SAME times_local
+    // range interrupted mid-stream? ---
+    std::optional<GpuIntegrator::StreamCheckpoint> stream_resume;
+    if (!overwrite) {
+        if (auto loaded = try_read_stream_checkpoint(checkpoint_path)) {
+            if (stream_checkpoint_matches(*loaded, setup, k_done, n_t_total, times_local)) {
+                stream_resume = loaded->checkpoint;
+                std::cout << "Resuming stream from " << checkpoint_path
+                          << "  (batches_done=" << stream_resume->batches_done << ")\n";
+            } else {
+                std::cout << "Ignoring stale " << checkpoint_path
+                          << " (setup/progress has changed since it was written) -- "
+                             "starting this range's streaming from scratch.\n";
+                fs::remove(checkpoint_path);
+            }
+        }
+    }
+
+    // --- Truncate setup.times/n_t to just the remaining range. Evolution
+    // never reads setup.times/n_t (only field-evolution parameters), so
+    // mutating them in place here -- before either GpuIntegrator or
+    // Evolution is constructed -- is safe. ---
+    setup.times = times_local;
+    setup.n_t   = static_cast<int>(times_local.size());
+
     auto t_integrator_setup = Clock::now();
-    GpuIntegrator integrator(setup, qual_param, filon_panels_per_osc, s_batch_size);
+    GpuIntegrator integrator(setup, qual_param, filon_panels_per_osc, s_batch_size,
+                             seed ? &*seed : nullptr,
+                             stream_resume ? &*stream_resume : nullptr);
     std::cout << "Timing phase=integrator_setup_total seconds="
               << elapsed(t_integrator_setup) << "\n";
 
     // --- 2+3. Stream the 2D Milne evolution through bounded s-batches,
     // running the GW integration (all cutoff times, for each batch) as each
     // batch becomes available, instead of evolving the complete history
-    // first and integrating it afterwards. ---
+    // first and integrating it afterwards. Periodically (time-based) writes
+    // a Format-B progress checkpoint, so an interruption here doesn't lose
+    // all GPU integration work done so far -- see checkpoint_io.h. ---
     auto t_stream = Clock::now();
+    auto t_last_checkpoint = Clock::now();
+    const double checkpoint_interval_seconds = checkpoint_interval_minutes * 60.0;
     {
         SBatchWindow window(s_batch_size,
             [&](const std::vector<std::vector<double>> &phi_batch,
                 const std::vector<double> &s_batch,
                 bool is_first_batch, bool is_last_batch) {
                 integrator.ProcessBatch(phi_batch, s_batch, is_first_batch, is_last_batch);
+                if (!is_last_batch &&
+                    elapsed(t_last_checkpoint) >= checkpoint_interval_seconds) {
+                    write_stream_checkpoint(checkpoint_path, integrator.MakeStreamCheckpoint(),
+                                            setup, k_done, n_t_total, times_local);
+                    t_last_checkpoint = Clock::now();
+                    std::cout << "Wrote stream checkpoint to " << checkpoint_path << "\n";
+                }
             });
         Evolution evo(setup,
             [&](const std::vector<double> &phi, double s, bool is_last) {
@@ -129,24 +262,43 @@ int main(int argc, char *argv[]) {
     std::cout << "Timing phase=stream_all seconds=" << elapsed(t_stream) << "\n";
 
     // --- 4. Cheap finalize pass: square + k-integrate the accumulated
-    // per-cutoff amplitude, then write output. No further kernel launches. ---
+    // per-cutoff amplitude, then write output. No further kernel launches.
+    // Writes at the GLOBAL result index (k_done + local), so this range's
+    // files land alongside any earlier-completed prefix without collision;
+    // safe to re-run even over partially-written files from an earlier
+    // interrupted finalize pass (SaveStepResult truncates each file fresh). ---
     const auto &wlist = integrator.GetW();
-    const int n_t = setup.n_t;
     auto t_finalize = Clock::now();
-    for (int i_t = 0; i_t < n_t; ++i_t) {
+    for (int local_i_t = 0; local_i_t < setup.n_t; ++local_i_t) {
+        const int global_i_t = k_done + local_i_t;
+        const double t = times_local[local_i_t];
         auto t_it = Clock::now();
         if (save_amplitude) {
-            AmplitudeResult res = integrator.FinalizeAmplitude(i_t);
-            SaveAmplitudeResult(output_dir, i_t, setup.times[i_t], res);
+            AmplitudeResult res = integrator.FinalizeAmplitude(local_i_t);
+            SaveAmplitudeResult(output_dir, global_i_t, t, res);
         } else {
-            std::vector<double> spectrum = integrator.Finalize(i_t);
-            SaveStepResult(output_dir, i_t, setup.times[i_t], wlist, spectrum);
+            std::vector<double> spectrum = integrator.Finalize(local_i_t);
+            SaveStepResult(output_dir, global_i_t, t, wlist, spectrum);
         }
-        std::cout << "Timing phase=finalize index=" << i_t
+        std::cout << "Timing phase=finalize index=" << global_i_t
                   << " seconds=" << elapsed(t_it) << "\n";
     }
-    std::cout << "Timing phase=finalize_all count=" << n_t
+    std::cout << "Timing phase=finalize_all count=" << setup.n_t
               << " seconds=" << elapsed(t_finalize) << "\n";
+
+    // --- 5. Format A: embed a plateau checkpoint in this row's true last
+    // result file, so a FUTURE run can extend it to even later cutoff times
+    // without re-integrating these. Only written once every requested time
+    // has a result on disk (the loop above completed), matching the
+    // "Format A only exists for a row that reached the end" design. ---
+    auto t_checkpoint = Clock::now();
+    write_plateau_checkpoint(result_path_for(n_t_total - 1), integrator.MakeCheckpoint(),
+                             setup.n_w, setup.n_k);
+    std::cout << "Timing phase=checkpoint seconds=" << elapsed(t_checkpoint) << "\n";
+
+    // --- This row is now fully complete -- the Format B progress checkpoint
+    // (if any) is obsolete. ---
+    if (fs::exists(checkpoint_path)) fs::remove(checkpoint_path);
 
     std::cout << "Total: " << elapsed(t_start) << " s\n";
     return 0;

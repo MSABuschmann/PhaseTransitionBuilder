@@ -15,8 +15,7 @@
 // (see ProcessBatch) so device memory scales with a small, fixed batch size
 // rather than with the full s-grid — the full history plus its z/w/k-indexed
 // buffers scale roughly as gamma_ij^4 and become infeasible on a single GPU
-// well before gamma_ij=32/64 (see AI_HANDOFF.md's "Planned minimal-memory GPU
-// rewrite"). main.cpp streams Evolution's snapshots through an SBatchWindow
+// well before gamma_ij=32/64. main.cpp streams Evolution's snapshots through an SBatchWindow
 // into ProcessBatch(); once every batch has been processed, Finalize(i_t)/
 // FinalizeAmplitude(i_t) read out the accumulated result per cutoff time.
 //
@@ -33,13 +32,58 @@
 //     once every batch has contributed.
 class GpuIntegrator {
 public:
+    // Checkpoint/resume: the state needed to extend a row to new, later
+    // cutoff times without re-integrating the ones already computed.
+    //   seed_time  : the physical time of the row that produced this
+    //                checkpoint (its last requested cutoff).
+    //   plateau_re/plateau_im : the "pure plateau" amplitude (Re/Im A(w,k),
+    //                same layout as AmplitudeResult::amp_re/amp_im) up to
+    //                seed_time's OWN t_cut -- NOT the final windowed
+    //                amplitude (which would double-count seed_time's own
+    //                transition-window contribution when reused for a
+    //                later time -- see the derivation in ProcessBatch/
+    //                gw_kernel's comments and FinalizeImpl below).
+    struct Checkpoint {
+        double seed_time = 0.;
+        std::vector<double> plateau_re, plateau_im;   // [n_w * n_k] each
+    };
+
+    // Mid-stream progress checkpoint: lets a run interrupted (e.g. by
+    // walltime) partway through ProcessBatch()-ing THIS SAME requested times
+    // range resume without redoing the expensive GPU integration for batches
+    // already folded into accum_/accum_plateau_. Field evolution itself is
+    // assumed cheap and always restarts from s=0 (see ProcessBatch's skip
+    // logic) -- only the batch COUNT needs to be remembered, not any
+    // per-batch field/cum state (which is reset every batch anyway).
+    // Only ever valid for resuming the EXACT same (setup, times-range) that
+    // produced it -- callers must check the fingerprint before constructing
+    // (see checkpoint_io.h's stream_checkpoint_matches).
+    struct StreamCheckpoint {
+        int batches_done = 0;
+        std::vector<double> accum;            // same layout as accum_
+        std::vector<double> accum_plateau;    // same layout as accum_plateau_
+    };
+
     // param > 0: use param directly as n_floor (same as --param N for CPU Filon)
     // param <= 0: default n_floor = 8192
     // s_batch_size: number of NEW s-slices processed per ProcessBatch() call
     //   (device buffers are sized for s_batch_size+1 to hold the halo slice).
+    // seed: optional checkpoint from a prior run of the SAME (gamma_ij, d)
+    //   row; every setup.times[] entry must be strictly greater than
+    //   seed->seed_time (this class does not validate that setup itself
+    //   matches the checkpoint's origin -- callers must check the fingerprint
+    //   before constructing).
+    // resume: optional mid-stream progress from an interrupted attempt at
+    //   this EXACT (setup, times) request -- resumes accum_/accum_plateau_
+    //   from it and skips GPU work for the batches it already covers.
+    //   Independent of `seed`: a run can be both seeded (extending an
+    //   earlier-completed prefix of this row) and resumed (this particular
+    //   extension attempt was itself interrupted) at the same time.
     GpuIntegrator(const Setup &setup, int param = -1,
                   int panels_per_oscillation = 64,
-                  int s_batch_size = 32);
+                  int s_batch_size = 32,
+                  const Checkpoint *seed = nullptr,
+                  const StreamCheckpoint *resume = nullptr);
     ~GpuIntegrator();
 
     GpuIntegrator(const GpuIntegrator &)            = delete;
@@ -60,9 +104,28 @@ public:
     // Cheap CPU-only readouts of the accumulated result for one cutoff index.
     // No kernel launch; callable in any order, any number of times, only
     // valid after the last ProcessBatch() call (is_last_batch == true) has
-    // returned.
+    // returned. If this run was seeded (see Checkpoint), the seed's
+    // plateau_re/plateau_im are added in before squaring/k-integration, so
+    // these already reflect the FULL cumulative result from s=0 of the
+    // original row, not just this run's own increment.
     std::vector<double> Finalize(int i_t) const;
     AmplitudeResult      FinalizeAmplitude(int i_t) const;
+
+    // Checkpoint for a FUTURE extension beyond this run's own last requested
+    // time (setup.times.back()). Combines this run's own plateau-only
+    // accumulator (accum_plateau_, built alongside accum_ but only tracking
+    // contributions up through the LAST i_t's own t_cut, excluding its
+    // transition-window piece) with any seed this run itself was given, so
+    // checkpoints chain correctly across repeated extensions. Only valid
+    // after the last ProcessBatch() call has returned.
+    Checkpoint MakeCheckpoint() const;
+
+    // Mid-stream progress checkpoint, for a run that gets interrupted before
+    // reaching is_last_batch. Callable after ANY ProcessBatch() call (no
+    // need to have finalized) -- reflects however many batches have been
+    // folded into accum_/accum_plateau_ so far, including any batches
+    // skipped because `resume` already covered them.
+    StreamCheckpoint MakeStreamCheckpoint() const;
 
     const std::vector<double> &GetW() const { return wlist_; }
 
@@ -76,9 +139,17 @@ private:
                           std::vector<double> &phi2_host) const;
 
     // Shared finalize implementation for Finalize()/FinalizeAmplitude().
+    // Adds seed_re_/seed_im_ (if has_seed_) before squaring/k-integration.
     std::vector<double> FinalizeImpl(int i_t,
                                      std::vector<double> *out_amp_re,
                                      std::vector<double> *out_amp_im) const;
+
+    // Combines accum_plateau_'s 6 raw components into plateau_re/plateau_im
+    // via the SAME linear (Onemkk/TwokSq) combination FinalizeImpl uses for
+    // accum_ -- no squaring, no k-integration. This is this run's OWN
+    // plateau contribution only; MakeCheckpoint() adds any seed on top.
+    void CombinePlateau(std::vector<double> &plateau_re,
+                        std::vector<double> &plateau_im) const;
 
     std::size_t n_w_, n_k_, n_z_;
     std::size_t n_t_;
@@ -119,6 +190,14 @@ private:
     double *d_s_      = nullptr;   // [max_alloc_]
     double *d_zbuf_   = nullptr;   // [n_w_ * n_k_ * max_alloc_ * 6], recomputed once per batch
     double *d_intbuf_ = nullptr;   // [n_w_ * n_k_ * max_alloc_ * 6]  -- reused each cutoff within a batch
+    // Mirrors d_intbuf_ exactly, but built from the PRE-transition-window
+    // cum state (cumbuf, as it stands right after this launch's plateau
+    // update) instead of the full zz_r/xx/yy/xz values -- i.e. this cutoff's
+    // contribution with its OWN transition-window piece excluded. Written by
+    // gw_kernel on every launch (cheap: reuses values already in registers);
+    // only copied back and reduced on the host for i_t == n_t_-1, since
+    // that is the only cutoff a future checkpoint can ever be taken from.
+    double *d_plateau_intbuf_ = nullptr;   // [n_w_ * n_k_ * max_alloc_ * 6]
 
 #ifdef GW_KERNEL_TIMING
     // Diagnostic-build-only: per-thread clock64() cycle counts for
@@ -138,7 +217,10 @@ private:
     double *d_cumbuf_ = nullptr;
 
     // t_cut from the previous cutoff-time step, WITHIN the current batch;
-    // reset to the sentinel at the start of every ProcessBatch() call.
+    // reset at the start of every ProcessBatch() call -- to kNegInfSentinel
+    // normally (nothing precedes the first i_t), or to seed_t_cut_ if this
+    // run was seeded from a checkpoint (skips re-integrating the u-range the
+    // seed's row already covered).
     static constexpr double kNegInfSentinel = -1e30;
     double t_cut_prev_ = kNegInfSentinel;
 
@@ -151,5 +233,31 @@ private:
     // k-integration happens only there, once all batches have contributed.
     std::vector<double> accum_;
 
+    // Same accumulation as accum_, but only for the LAST cutoff index
+    // (n_t_-1) and only its plateau (pre-transition-window) contribution --
+    // i.e. sized n_w_*n_k_*6, not n_t_*n_w_*n_k_*6. Reduced from
+    // d_plateau_intbuf_ every batch, same as accum_'s own reduction.
+    // CombinePlateau()/MakeCheckpoint() turn this into the amplitude a
+    // future run can seed itself from.
+    std::vector<double> accum_plateau_;
+
+    // Optional seed from a prior checkpoint (see constructor's `seed`
+    // parameter). has_seed_ gates both the per-batch t_cut_prev_ reset and
+    // FinalizeImpl's post-accum_ addition.
+    bool has_seed_ = false;
+    double seed_t_cut_ = kNegInfSentinel;
+    std::vector<double> seed_re_, seed_im_;   // [n_w_ * n_k_] each, if has_seed_
+
     bool finalized_ = false;   // true once is_last_batch has been processed
+
+    // Batch-skip bookkeeping for Format-B stream-resume. next_batch_index_
+    // counts every ProcessBatch() call (skipped or not); a call with
+    // next_batch_index_ < skip_until_ does zero GPU work (no upload, no
+    // kernel launch) since its contribution is already folded into the
+    // accum_/accum_plateau_ this run was constructed with -- field evolution
+    // still regenerates that batch (cheap, restarted from s=0 by main.cpp),
+    // it's just never handed to the GPU. skip_until_ is 0 (nothing skipped)
+    // unless this run was constructed with a StreamCheckpoint.
+    int next_batch_index_ = 0;
+    int skip_until_       = 0;
 };

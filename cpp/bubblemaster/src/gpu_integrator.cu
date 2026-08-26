@@ -433,6 +433,7 @@ __global__ void gw_kernel(
     int cutoff_type, int n_floor, int panels_per_oscillation,
     double t_cut_prev,
     double * __restrict__ intbuf,        // [n_w * n_k * n_s * 6]
+    double * __restrict__ plateau_intbuf,// [n_w * n_k * n_s * 6] -- same layout as intbuf, pre-transition-window
     double * __restrict__ cumbuf         // [n_w * n_k * n_s * 16] -- persists across cutoffs WITHIN one batch
 #ifdef GW_KERNEL_TIMING
     , long long * __restrict__ timebuf   // [n_w*n_k*n_s*5] per-thread cycle counts:
@@ -538,6 +539,23 @@ __global__ void gw_kernel(
     intbuf[base + 4] = pre_xz * (xz1*iz1_xz + xz2*iz2_xz);
     intbuf[base + 5] = pre_xz * (xzi1*iz1_xz + xzi2*iz2_xz);
 
+    // Plateau-only mirror of the six lines above: same combination, but
+    // using the cum_* values (this cutoff's plateau contribution, AFTER its
+    // own filon_*_incremental update above but BEFORE its transition-window
+    // piece) instead of zz_r1/xx1/etc (which include that window). Cheap --
+    // reuses iz*_zz/xa/xz and pre_zz/pre_xa/pre_xz already in registers.
+    // Written every launch; the host only copies/reduces this for i_t ==
+    // n_t_-1 (see GpuIntegrator::ProcessBatch), since that is the only
+    // cutoff a future checkpoint can be taken from.
+    plateau_intbuf[base + 0] = pre_zz * (cum_zz1_re*iz1_zz + cum_zz2_re*iz2_zz);
+    plateau_intbuf[base + 1] = pre_zz * (cum_zz1_im*iz1_zz + cum_zz2_im*iz2_zz);
+    plateau_intbuf[base + 2] = pre_xa * ((cum_xx1_re*k_sq - cum_yy1_re)*iz1_xa
+                                        + (cum_xx2_re*k_sq - cum_yy2_re)*iz2_xa);
+    plateau_intbuf[base + 3] = pre_xa * ((cum_xx1_im*k_sq - cum_yy1_im)*iz1_xa
+                                        + (cum_xx2_im*k_sq - cum_yy2_im)*iz2_xa);
+    plateau_intbuf[base + 4] = pre_xz * (cum_xz1_re*iz1_xz + cum_xz2_re*iz2_xz);
+    plateau_intbuf[base + 5] = pre_xz * (cum_xz1_im*iz1_xz + cum_xz2_im*iz2_xz);
+
 #ifdef GW_KERNEL_TIMING
     long long t5 = clock64();
     long long *tb = timebuf + idx * 5;
@@ -554,7 +572,9 @@ __global__ void gw_kernel(
 // ---------------------------------------------------------------------------
 
 GpuIntegrator::GpuIntegrator(const Setup &setup, int param,
-                             int panels_per_oscillation, int s_batch_size)
+                             int panels_per_oscillation, int s_batch_size,
+                             const Checkpoint *seed,
+                             const StreamCheckpoint *resume)
     : n_k_(setup.n_k), n_w_(setup.n_w), n_z_(setup.z.size()),
       n_t_(static_cast<std::size_t>(setup.n_t)),
       ds_(setup.ds * setup.how_often_ds),
@@ -572,6 +592,50 @@ GpuIntegrator::GpuIntegrator(const Setup &setup, int param,
 
     klist_ = linspace(0., 1., static_cast<int>(n_k_));
     accum_.assign(n_t_ * n_w_ * n_k_ * 6, 0.);
+    accum_plateau_.assign(n_w_ * n_k_ * 6, 0.);
+
+    // --- Seed from a prior checkpoint, if given ---
+    // Every requested cutoff must be strictly later than the checkpoint's
+    // own seed time: the plateau/transition-window decomposition this
+    // relies on only holds going forward -- a requested time at or before
+    // seed_time would need this row's u-integral re-run from s=0 for that
+    // cutoff, which a seeded run does not do.
+    if (seed) {
+        for (double t : times_) {
+            if (t <= seed->seed_time)
+                throw std::runtime_error(
+                    "GpuIntegrator: seeded run requires every setup.times[] "
+                    "entry to be strictly greater than the checkpoint's "
+                    "seed_time (" + std::to_string(seed->seed_time) +
+                    "); got " + std::to_string(t));
+        }
+        const std::size_t n_wk = n_w_ * n_k_;
+        if (seed->plateau_re.size() != n_wk || seed->plateau_im.size() != n_wk)
+            throw std::runtime_error(
+                "GpuIntegrator: checkpoint plateau_re/plateau_im size does "
+                "not match this setup's n_w*n_k -- checkpoint is from a "
+                "different (n_w, n_k) than the current setup.h5");
+        has_seed_    = true;
+        seed_t_cut_  = t_cut_base_ - (t_m_base_ - seed->seed_time);
+        seed_re_     = seed->plateau_re;
+        seed_im_     = seed->plateau_im;
+    }
+
+    // --- Resume mid-stream progress from a prior, interrupted attempt at
+    // this EXACT times range, if given (independent of `seed` above -- see
+    // the constructor's doc comment). ---
+    if (resume) {
+        const std::size_t n_accum   = n_t_ * n_w_ * n_k_ * 6;
+        const std::size_t n_plateau = n_w_ * n_k_ * 6;
+        if (resume->accum.size() != n_accum || resume->accum_plateau.size() != n_plateau)
+            throw std::runtime_error(
+                "GpuIntegrator: StreamCheckpoint accum size does not match this "
+                "setup's n_t*n_w*n_k -- checkpoint is from a different times "
+                "request than the current setup.h5");
+        accum_         = resume->accum;
+        accum_plateau_ = resume->accum_plateau;
+        skip_until_    = resume->batches_done;
+    }
 
     // --- Build the persistent phi0 interpolator directly from setup.phi0 ---
     // (build_phi2's original logic only ever read input_phi[0], i.e. the t=0
@@ -617,6 +681,7 @@ GpuIntegrator::GpuIntegrator(const Setup &setup, int param,
     const std::size_t batch_total = n_w_ * n_k_ * static_cast<std::size_t>(max_alloc_);
     CUDA_CHECK(cudaMalloc(&d_zbuf_,   batch_total * 6  * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_intbuf_, batch_total * 6  * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_plateau_intbuf_, batch_total * 6 * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_cumbuf_, batch_total * 16 * sizeof(double)));
 
     size_t free_b, total_b;
@@ -645,6 +710,7 @@ GpuIntegrator::~GpuIntegrator()
     cudaFree(d_s_);
     cudaFree(d_zbuf_);
     cudaFree(d_intbuf_);
+    cudaFree(d_plateau_intbuf_);
     cudaFree(d_cumbuf_);
 #ifdef GW_KERNEL_TIMING
     cudaFree(d_timebuf_);
@@ -690,6 +756,21 @@ void GpuIntegrator::ProcessBatch(const std::vector<std::vector<double>> &batch_p
     if (finalized_)
         throw std::runtime_error(
             "GpuIntegrator::ProcessBatch called after the last batch was already processed");
+
+    // --- Format-B resume: skip batches already folded into accum_/accum_plateau_ ---
+    // Field evolution still regenerates this batch's data (main.cpp restarts
+    // it from s=0 every run -- cheap), but it's never uploaded or handed to
+    // a kernel here, since its contribution is already in accum_. Guards
+    // is_last_batch too: if the interrupted run got as far as streaming
+    // everything (just never reached its own finalize/checkpoint-delete
+    // step), this lets a resume skip straight to being finalized_ with zero
+    // GPU work at all.
+    const int this_batch = next_batch_index_++;
+    if (this_batch < skip_until_) {
+        if (is_last_batch)
+            finalized_ = true;
+        return;
+    }
 
     const int n_s_local = static_cast<int>(batch_phi.size());
     if (n_s_local < 1 || n_s_local > max_alloc_)
@@ -742,14 +823,19 @@ void GpuIntegrator::ProcessBatch(const std::vector<std::vector<double>> &batch_p
 
     // --- Reset this batch's incremental plateau state ---
     // (each s belongs to exactly one batch -- cum state must NOT persist
-    // across batches, only across the cutoff-time loop within this one)
+    // across batches, only across the cutoff-time loop within this one).
+    // If this run was seeded from a checkpoint, t_cut_prev_ starts at the
+    // seed's own t_cut instead of -inf, so the first i_t processed in every
+    // batch skips re-integrating the u-range the seed's row already covered
+    // (see the constructor's seed_t_cut_ derivation).
     CUDA_CHECK(cudaMemset(d_cumbuf_, 0, total * 16 * sizeof(double)));
-    t_cut_prev_ = kNegInfSentinel;
+    t_cut_prev_ = has_seed_ ? seed_t_cut_ : kNegInfSentinel;
     CUDA_CHECK(cudaDeviceSynchronize());
 
     n_floor_ = param_floor_ > 0 ? param_floor_ : 8192;
 
     std::vector<double> buf(total * 6);
+    std::vector<double> plateau_buf;   // only filled/used for i_t == n_t_-1
     double kernel_seconds = 0., transfer_seconds = 0., reduce_seconds = 0.;
 
     for (std::size_t i_t = 0; i_t < n_t_; ++i_t) {
@@ -761,13 +847,14 @@ void GpuIntegrator::ProcessBatch(const std::vector<std::vector<double>> &batch_p
         double t_max  = t_max_base_ - shift;
 
         CUDA_CHECK(cudaMemset(d_intbuf_, 0, total * 6 * sizeof(double)));
+        CUDA_CHECK(cudaMemset(d_plateau_intbuf_, 0, total * 6 * sizeof(double)));
         gw_kernel<<<grid, BLOCK>>>(
             n_s_local, static_cast<int>(n_w_), static_cast<int>(n_k_),
             i_s_start, is_last_batch,
             ds_, d_w_, d_k_, d_s_, d_zbuf_,
             t_cut, t_m, t_0_, t_max,
             cutoff_type_, n_floor_, panels_per_oscillation_, t_cut_prev_,
-            d_intbuf_, d_cumbuf_
+            d_intbuf_, d_plateau_intbuf_, d_cumbuf_
 #ifdef GW_KERNEL_TIMING
             , d_timebuf_
 #endif
@@ -778,6 +865,13 @@ void GpuIntegrator::ProcessBatch(const std::vector<std::vector<double>> &batch_p
 
         const auto t_transfer = std::chrono::steady_clock::now();
         CUDA_CHECK(cudaMemcpy(buf.data(), d_intbuf_, buf.size() * sizeof(double), cudaMemcpyDeviceToHost));
+        const bool is_last_i_t = (i_t == n_t_ - 1);
+        if (is_last_i_t) {
+            plateau_buf.resize(total * 6);
+            CUDA_CHECK(cudaMemcpy(plateau_buf.data(), d_plateau_intbuf_,
+                                  plateau_buf.size() * sizeof(double),
+                                  cudaMemcpyDeviceToHost));
+        }
         transfer_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_transfer).count();
 
         const auto t_reduce = std::chrono::steady_clock::now();
@@ -785,12 +879,19 @@ void GpuIntegrator::ProcessBatch(const std::vector<std::vector<double>> &batch_p
         for (std::size_t iw = 0; iw < n_w_; ++iw) {
             for (std::size_t ik = 0; ik < n_k_; ++ik) {
                 double sums[6] = {0., 0., 0., 0., 0., 0.};
+                double plateau_sums[6] = {0., 0., 0., 0., 0., 0.};
                 for (int is = i_s_start; is < n_s_local; ++is) {
                     std::size_t base = (iw * n_k_ * n_s_local + ik * n_s_local + is) * 6;
                     for (int c = 0; c < 6; ++c) sums[c] += buf[base + c];
+                    if (is_last_i_t)
+                        for (int c = 0; c < 6; ++c) plateau_sums[c] += plateau_buf[base + c];
                 }
                 double *dst = &acc[(iw * n_k_ + ik) * 6];
                 for (int c = 0; c < 6; ++c) dst[c] += sums[c];
+                if (is_last_i_t) {
+                    double *pdst = &accum_plateau_[(iw * n_k_ + ik) * 6];
+                    for (int c = 0; c < 6; ++c) pdst[c] += plateau_sums[c];
+                }
             }
         }
         reduce_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_reduce).count();
@@ -849,6 +950,19 @@ std::vector<double> GpuIntegrator::FinalizeImpl(int i_t,
 
             double re = szz_r*Onemkk + sxa_r - TwokSq*sxz_r;
             double im = szz_i*Onemkk + sxa_i - TwokSq*sxz_i;
+            // If this run was seeded from a checkpoint, add the seed's own
+            // plateau contribution (everything up to the seed row's t_cut)
+            // -- this run's accum_ only ever holds ITS OWN increment, built
+            // from t_cut_prev_ starting at seed_t_cut_ (see ProcessBatch),
+            // so re/im here is otherwise only the piece from the seed's
+            // time onward, not the full result. The combination is linear
+            // (Onemkk/TwokSq are fixed per (w,k)), so adding seed_re_/
+            // seed_im_ here -- rather than needing the seed's own raw
+            // szz/sxa/sxz -- is exact, not an approximation.
+            if (has_seed_) {
+                re += seed_re_[iw * n_k_ + ik];
+                im += seed_im_[iw * n_k_ + ik];
+            }
             if (out_amp_re) {
                 (*out_amp_re)[iw * n_k_ + ik] = re;
                 (*out_amp_im)[iw * n_k_ + ik] = im;
@@ -879,6 +993,72 @@ AmplitudeResult GpuIntegrator::FinalizeAmplitude(int i_t) const
     res.amp_im.assign(n_w_ * n_k_, 0.);
     res.spectrum = FinalizeImpl(i_t, &res.amp_re, &res.amp_im);
     return res;
+}
+
+// ---------------------------------------------------------------------------
+// Checkpointing -- see gpu_integrator.cuh's Checkpoint doc comment.
+// CombinePlateau applies the SAME linear (Onemkk/TwokSq) combination
+// FinalizeImpl uses on accum_, but to accum_plateau_ instead, and stops
+// before squaring/k-integration -- accum_plateau_ only ever holds the LAST
+// cutoff index's pre-transition-window contribution (see ProcessBatch),
+// summed over every batch this run processed.
+// ---------------------------------------------------------------------------
+
+void GpuIntegrator::CombinePlateau(std::vector<double> &plateau_re,
+                                   std::vector<double> &plateau_im) const
+{
+    plateau_re.assign(n_w_ * n_k_, 0.);
+    plateau_im.assign(n_w_ * n_k_, 0.);
+
+    for (std::size_t iw = 0; iw < n_w_; ++iw) {
+        for (std::size_t ik = 0; ik < n_k_; ++ik) {
+            double k      = klist_[ik];
+            double Onemkk = 1. - k*k;
+            double TwokSq = 2. * k * std::sqrt(Onemkk);
+
+            const double *s6 = &accum_plateau_[(iw * n_k_ + ik) * 6];
+            double szz_r = s6[0], szz_i = s6[1];
+            double sxa_r = s6[2], sxa_i = s6[3];
+            double sxz_r = s6[4], sxz_i = s6[5];
+
+            plateau_re[iw * n_k_ + ik] = szz_r*Onemkk + sxa_r - TwokSq*sxz_r;
+            plateau_im[iw * n_k_ + ik] = szz_i*Onemkk + sxa_i - TwokSq*sxz_i;
+        }
+    }
+}
+
+GpuIntegrator::Checkpoint GpuIntegrator::MakeCheckpoint() const
+{
+    if (!finalized_)
+        throw std::runtime_error(
+            "GpuIntegrator::MakeCheckpoint called before the last batch was processed");
+
+    Checkpoint cp;
+    cp.seed_time = times_.back();
+
+    CombinePlateau(cp.plateau_re, cp.plateau_im);
+
+    // Chain: if THIS run was itself seeded, its own plateau (just computed)
+    // only covers seed_t_cut_ onward -- add the prior seed back in so the
+    // checkpoint this run produces is the FULL plateau from s=0 of the
+    // original row, exactly like FinalizeImpl does for the spectrum output.
+    if (has_seed_) {
+        for (std::size_t i = 0; i < cp.plateau_re.size(); ++i) {
+            cp.plateau_re[i] += seed_re_[i];
+            cp.plateau_im[i] += seed_im_[i];
+        }
+    }
+
+    return cp;
+}
+
+GpuIntegrator::StreamCheckpoint GpuIntegrator::MakeStreamCheckpoint() const
+{
+    StreamCheckpoint sc;
+    sc.batches_done    = next_batch_index_;
+    sc.accum           = accum_;
+    sc.accum_plateau   = accum_plateau_;
+    return sc;
 }
 
 // ---------------------------------------------------------------------------

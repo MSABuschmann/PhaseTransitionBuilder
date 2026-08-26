@@ -259,6 +259,59 @@ def write_2d_setup(model, gamma: float, times: np.ndarray,
         f.create_dataset("times", data=np.asarray(times, dtype="float64"))
 
 
+def extend_2d_setup_times(setup_path: Path, new_times: np.ndarray) -> None:
+    """
+    Extend an already-run row's setup.h5 IN PLACE to new, later cutoff
+    times, by appending ``new_times`` to its existing ``times[]`` array.
+
+    ``bubblemaster_gpu`` re-run on this SAME setup_path/output_dir pair
+    afterwards auto-detects (by counting existing ``result_*.h5`` files
+    against the new, larger ``n_t``) that this row now has more requested
+    times than it has results for, and extends it using the plateau
+    checkpoint embedded in its current last result file -- see main.cpp's
+    auto-detection and ``checkpoint_io.h``'s Format A. There is deliberately
+    no separate "continuation setup" file: reusing the same setup.h5/
+    output_dir is what lets that auto-detection work.
+
+    Every entry in ``new_times`` must be strictly greater than the setup's
+    current last requested time -- the plateau checkpoint only has state to
+    extend forward, never to fill in or redo an earlier cutoff.
+
+    Only ``times``/``n_t`` change. Everything else -- critically including
+    ``wlist`` and ``t_0``/``t_cut``/``t_m``/``t_max``/``smax`` -- is left
+    completely untouched. ``wlist`` must stay the row's ORIGINAL frequency
+    grid, not one recomputed for a possibly-different GAMMA_STAR_MAX (the
+    GPU binary hard-checks this against the row's own last result file and
+    refuses to run otherwise -- see main.cpp). ``t_0``/``t_cut``/``t_m``/
+    ``t_max``/``smax`` are the row's own fixed reference values that every
+    cutoff time's windowing is shifted relative to (see
+    ``gpu_integrator.cu``'s ProcessBatch); recomputing them from the new,
+    longer ``times`` array would break the plateau checkpoint's validity.
+    """
+    new_times = np.asarray(new_times, dtype=float)
+    if new_times.ndim != 1 or len(new_times) < 1:
+        raise ValueError("new_times must be a non-empty 1-D array")
+
+    with h5py.File(setup_path, "r+") as f:
+        old_times = f["times"][:]
+        if len(old_times) == 0:
+            raise ValueError(f"{setup_path} has an empty times[] array")
+        old_last = float(old_times[-1])
+        if np.any(new_times <= old_last):
+            raise ValueError(
+                f"new_times must all be strictly greater than {setup_path}'s "
+                f"current last time ({old_last:.6f}); got "
+                f"min(new_times)={new_times.min():.6f}"
+            )
+        if np.any(np.diff(new_times) <= 0):
+            raise ValueError("new_times must be strictly increasing")
+
+        full_times = np.concatenate([old_times, new_times])
+        del f["times"]
+        f.create_dataset("times", data=full_times, dtype="float64")
+        f.attrs["n_t"] = np.int32(len(full_times))
+
+
 # ---------------------------------------------------------------------------
 # 3D sledgehamr bubble injection
 # ---------------------------------------------------------------------------
