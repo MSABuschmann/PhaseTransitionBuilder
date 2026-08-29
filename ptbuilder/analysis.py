@@ -2,11 +2,12 @@
 Bootstrap GW spectrum: combine 2D scan results with collision weights.
 """
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Dict, Optional
 
 import h5py
 import numpy as np
-from scipy.interpolate import RegularGridInterpolator
+from scipy.interpolate import RegularGridInterpolator, interp1d
 
 _ASSETS_DIR = Path(__file__).parent / "assets"
 _KEFF_PATH  = _ASSETS_DIR / "keff.npy"
@@ -133,6 +134,130 @@ def build_scan_interpolator(scan_results: Dict[float, "ScanResult"],
         (gammas, times), spec_grid, bounds_error=False, fill_value=0.
     )
     return interp_s, gammas, times, k_out
+
+
+# ---------------------------------------------------------------------------
+# Non-rectangular runtime scan: query at an arbitrary (gamma_ij, t)
+#
+# Unlike the rectangular scan above (every row sharing the same times[] and
+# k grid, so RegularGridInterpolator applies directly), a runtime scan (as
+# built by ptbuilder.ic.generate_surrogate) gives each gamma_ij row its own
+# times[] (starting at that pair's own collision time) and its own wlist
+# (narrower at higher gamma_ij) -- there's no shared grid to hand to
+# RegularGridInterpolator. query_spectrum uses the same domain-aware
+# interpolation already validated for the N=64 reconstruction comparison
+# (16_n64_reconstruction_scan_comparison.ipynb's new_interp_fn), simplified
+# to a single-point query instead of the full weighted-N-bubble
+# reconstruction.
+# ---------------------------------------------------------------------------
+
+def load_scan(scan_root: Path) -> SimpleNamespace:
+    """
+    Load a runtime scan (as built by ptbuilder.ic.generate_surrogate) fully
+    into memory -- every row's own times[]/wlist[]/spectrum[n_t, n_w] -- so
+    query_spectrum() can be called repeatedly with no further disk I/O.
+    These scans are small (tens of rows x tens of times x ~32 frequencies),
+    so eager loading upfront is cheap and simpler than per-row lazy caching.
+
+    Raises FileNotFoundError if any row's results are incomplete (fewer
+    result_*.h5 files than its setup.h5 requests) -- naming the row.
+    """
+    scan_root = Path(scan_root)
+    root = scan_root.parent.parent
+
+    manifest_rows = []
+    with open(scan_root / "manifest.tsv") as f:
+        next(f)  # header
+        for line in f:
+            index, gamma, n_t, setup, name = line.rstrip("\n").split("\t")
+            manifest_rows.append((int(index), float(gamma), int(n_t), setup, name))
+
+    rows = []
+    for index, gamma, n_t, setup_rel, name in manifest_rows:
+        with h5py.File(root / setup_rel, "r") as f:
+            times = f["times"][:]
+            wlist = f["wlist"][:]
+        if len(times) != n_t:
+            raise RuntimeError(
+                f"{name}: setup.h5 has {len(times)} times, manifest says {n_t}")
+
+        out_dir = scan_root / "gpu" / name
+        spectrum = np.zeros((n_t, len(wlist)))
+        for it in range(n_t):
+            path = out_dir / f"result_{it:04d}.h5"
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"{name}: missing {path.relative_to(root)} -- this row hasn't "
+                    f"finished running yet")
+            with h5py.File(path, "r") as f:
+                spectrum[it] = f["spectrum"][:]
+
+        rows.append(SimpleNamespace(gamma_ij=gamma, times=times, wlist=wlist,
+                                    spectrum=spectrum))
+
+    rows.sort(key=lambda r: r.gamma_ij)
+    return SimpleNamespace(root=root, scan_root=scan_root, rows=rows)
+
+
+def _interp_row_at_t(row: SimpleNamespace, t: float) -> np.ndarray:
+    """Log-linear interpolation over one row's own times[] -- floored (in
+    log-space) below its own t_first (no collision yet in this row), clipped
+    to its last computed value above its own last time."""
+    floor = max(row.spectrum.max() * 1e-12, 1e-300)
+    log_spec = np.log(np.maximum(row.spectrum, floor))
+    f = interp1d(row.times, log_spec, axis=0, kind="linear", bounds_error=False,
+                fill_value=(np.log(floor), log_spec[-1]))
+    return np.exp(f(t))
+
+
+def query_spectrum(scan_data: SimpleNamespace, gamma_ij: float, t: float) -> tuple:
+    """
+    Query a non-rectangular runtime scan's GW spectrum at an arbitrary
+    (gamma_ij, t) via interpolation:
+      - log-linear across the two bracketing gamma_ij rows in scan_data.rows
+        (clipped to the scan's own gamma_ij range at the edges; if gamma_ij
+        exactly matches a row, that row's own wlist/spectrum, no
+        interpolation needed)
+      - log-linear across each bracketing row's own times[] (see
+        _interp_row_at_t)
+
+    scan_data is whatever load_scan() returned -- pure in-memory, no disk
+    I/O here, so cheap to call repeatedly (e.g. for several gamma_ij targets
+    against the same scan).
+
+    Returns (k, spectrum): k is the lower-gamma_ij bracketing row's own
+    wlist (rows generally have different frequency grids; the higher row's
+    spectrum is projected onto this one -- zero outside its own range --
+    before combining, same convention already used in notebooks 05/06/16).
+    """
+    rows = scan_data.rows
+    gammas = np.array([r.gamma_ij for r in rows])
+
+    g = float(np.clip(gamma_ij, gammas.min(), gammas.max()))
+    ig_hi = int(np.searchsorted(gammas, g))
+    ig_hi = min(max(ig_hi, 1), len(rows) - 1)
+    ig_lo = ig_hi - 1
+    if gammas[ig_hi] == g:
+        ig_lo = ig_hi
+
+    row_lo = rows[ig_lo]
+    spec_lo = _interp_row_at_t(row_lo, t)
+    k = row_lo.wlist
+
+    if ig_lo == ig_hi:
+        return k, spec_lo
+
+    row_hi = rows[ig_hi]
+    spec_hi = _interp_row_at_t(row_hi, t)
+    spec_hi_on_k = np.interp(k, row_hi.wlist, spec_hi, left=0., right=0.)
+
+    frac = (g - gammas[ig_lo]) / (gammas[ig_hi] - gammas[ig_lo])
+    floor = max(spec_lo.max(), spec_hi_on_k.max()) * 1e-12
+    floor = max(floor, 1e-300)
+    log_lo = np.log(np.maximum(spec_lo, floor))
+    log_hi = np.log(np.maximum(spec_hi_on_k, floor))
+    spectrum = np.exp(log_lo + frac * (log_hi - log_lo))
+    return k, spectrum
 
 
 # ---------------------------------------------------------------------------
