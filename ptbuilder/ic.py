@@ -3,6 +3,7 @@ Initial conditions: write setup files for BubbleMaster and sledgehamr.
 """
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional, Sequence
 
 import h5py
@@ -310,6 +311,231 @@ def extend_2d_setup_times(setup_path: Path, new_times: np.ndarray) -> None:
         del f["times"]
         f.create_dataset("times", data=full_times, dtype="float64")
         f.attrs["n_t"] = np.int32(len(full_times))
+
+
+def generate_surrogate(model, root: Path, tag_label: str,
+                       gamma_star_min: float, gamma_star_max: float,
+                       kR_min: float, kR_max: float, n_omega: int,
+                       extend_from: Optional[Path] = None,
+                       pair_gamma_factor: float = 2.5,
+                       time_factor: float = 1.4,
+                       omega_min_gamma_factor: float = 1.5,
+                       dgamma_ij: float = 0.4,
+                       dt: float = 2.0,
+                       n_k: int = 51,
+                       n_min: int = 128,
+                       panels_per_oscillation: int = 40,
+                       wall_points: int = 20,
+                       how_often_ds: int = 5,
+                       s_batch_size: int = 128,
+                       cutoff_type: int = 0,
+                       baby_steps: int = 100):
+    """
+    Build (or extend) a midpoint-convention BubbleMaster GPU scan: converts
+    a physical (gamma_*, kR_*, N_omega) range into the actual per-row
+    ``gamma_ij`` grid, each row's own ``times``/``wlist`` arrays, and writes
+    every row's setup.h5 (via write_2d_setup/extend_2d_setup_times) plus a
+    ``manifest.tsv`` listing them.
+
+    ``model`` must already be built (``model.kinematics``/``model.instanton``/
+    ``model.potential``, e.g. by loading an instanton profile and picking a
+    potential) -- this function only turns a range into rows, it doesn't
+    choose a physics model, and doesn't assume anything about what's inside
+    ``model.potential`` (different potentials may have different params).
+    ``tag_label`` is a plain, caller-chosen string identifying the model in
+    the scan's directory name (e.g. ``"lb0.84"`` for a phi4 potential at
+    lambda_bar=0.84) -- purely cosmetic, not read back from anywhere.
+
+    extend_from=None builds a fresh scan under
+    ``root/data/runtime_scan_{tag_label}_gs{gamma_star_min}-{gamma_star_max}
+    _kR{kR_min}-{kR_max}_nw{n_omega}/``.
+
+    extend_from=<existing runtime_scan_.../ directory> extends that scan's
+    GAMMA_STAR_MAX to gamma_star_max instead (which must be greater than the
+    old scan's own GAMMA_STAR_MAX, and at most omega_min_gamma_factor times
+    it -- the frequency-grid headroom baked in when the old scan was built).
+    gamma_star_min/kR_min/kR_max/n_omega/pair_gamma_factor/time_factor/
+    omega_min_gamma_factor are then read back from the old scan's own attrs
+    and OVERRIDE the arguments passed in here -- only gamma_star_max (the
+    new target) is actually used from the arguments in that case. Existing
+    rows get their times[] extended in place (wlist/geometry untouched, so
+    their already-computed results -- and the plateau checkpoint embedded in
+    each row's last result file -- remain valid seeds for the GPU binary's
+    own auto-detection); newly-in-range rows are written fresh. The scan
+    directory is renamed to match the new gamma_star_max.
+
+    Returns a SimpleNamespace: root, tag, scan_root, setup_dir, output_root,
+    manifest, manifest_rows (list of (index, gamma_ij, n_t, setup_path,
+    name)), gamma_ij_grid, n_old, plus n_min/panels_per_oscillation/
+    s_batch_size (needed to build a bubblemaster_gpu command line) and
+    t_max/r_star_max/omega_min (for a walltime estimate).
+    """
+    root = Path(root)
+    if not (0 < kR_min < kR_max):
+        raise ValueError("Require 0 < kR_min < kR_max")
+    if not (1.0 <= gamma_star_min <= gamma_star_max):
+        raise ValueError("Require 1 <= gamma_star_min <= gamma_star_max")
+    if n_omega < 2:
+        raise ValueError("n_omega must be >= 2")
+
+    kin = model.kinematics
+
+    def time_at_gamma(gamma):
+        if gamma <= 1.0:
+            return 0.0
+        return brentq(lambda t: float(kin.Gamma(t)) - gamma, 0.0, 1.0e7)
+
+    def rstar_at_gamma(gamma):
+        t = time_at_gamma(gamma)
+        return 2.0 * float(kin.R(t, r="mid"))
+
+    # --- If extending: read the old scan's actual manifest rows (never
+    # recomputed -- a fresh np.linspace over a larger gamma_ij_max would
+    # silently shift EVERY row's gamma_ij, not just add new ones) and its
+    # locked scan-definition attrs, overriding the arguments above with them.
+    old_rows = None
+    old_gamma_star_max = None
+    if extend_from is not None:
+        extend_from = Path(extend_from)
+        old_rows = []
+        with open(extend_from / "manifest.tsv") as f:
+            next(f)  # header
+            for line in f:
+                index, gamma, n_t, setup, name = line.rstrip("\n").split("\t")
+                old_rows.append(SimpleNamespace(index=int(index), gamma_ij=float(gamma),
+                                                n_t=int(n_t), name=name))
+
+        with h5py.File(extend_from / "setups" / f"{old_rows[-1].name}.h5", "r") as f:
+            old_gamma_star_max     = float(f.attrs["gamma_star_max"])
+            gamma_star_min         = float(f.attrs["gamma_star_min"])
+            kR_min                 = float(f.attrs["kR_min"])
+            kR_max                 = float(f.attrs["kR_max"])
+            pair_gamma_factor      = float(f.attrs["pair_gamma_factor"])
+            time_factor            = float(f.attrs["time_factor"])
+            omega_min_gamma_factor = float(f.attrs["omega_min_gamma_factor"])
+            n_omega                = int(f.attrs["n_w"])
+
+        if gamma_star_max <= old_gamma_star_max:
+            raise ValueError(
+                f"gamma_star_max ({gamma_star_max}) must be greater than the scan being "
+                f"extended's GAMMA_STAR_MAX ({old_gamma_star_max}) to extend it")
+        if gamma_star_max > omega_min_gamma_factor * old_gamma_star_max:
+            raise ValueError(
+                f"gamma_star_max ({gamma_star_max}) exceeds the old scan's frequency "
+                f"headroom ({omega_min_gamma_factor:g}x{old_gamma_star_max:g}="
+                f"{omega_min_gamma_factor*old_gamma_star_max:.3f}) -- extending this far "
+                f"would need new low-omega bins, which is not supported yet")
+
+    gamma_ij_max = pair_gamma_factor * gamma_star_max
+    r_star_max   = rstar_at_gamma(gamma_star_max)
+    t_max        = time_factor * r_star_max
+
+    # OMEGA_MIN is anchored to a gamma_star omega_min_gamma_factor times
+    # larger than gamma_star_max (not gamma_star_max itself), so a future
+    # scan that raises gamma_star_max by up to that factor can reuse this
+    # scan's low-omega bins without hitting an empty range.
+    r_star_omega_anchor = rstar_at_gamma(omega_min_gamma_factor * gamma_star_max)
+    omega_min = kR_min / r_star_omega_anchor
+
+    if old_rows is not None:
+        old_gamma_ij_grid = np.array([r.gamma_ij for r in old_rows])
+        last_old = old_gamma_ij_grid[-1]
+        n_new = int(np.ceil((gamma_ij_max - last_old) / dgamma_ij))
+        new_gamma_ij = last_old + dgamma_ij * np.arange(1, n_new + 1)
+        gamma_ij_grid = np.concatenate([old_gamma_ij_grid, new_gamma_ij])
+    else:
+        n_gamma = int(np.ceil((gamma_ij_max - gamma_star_min) / dgamma_ij)) + 1
+        gamma_ij_grid = np.linspace(gamma_star_min, gamma_ij_max, n_gamma)
+
+    # --- Directory: folder name encodes the scan's physical inputs. ---
+    tag = (f"{tag_label}_gs{gamma_star_min:g}-{gamma_star_max:g}"
+           f"_kR{kR_min:g}-{kR_max:g}_nw{n_omega}")
+    scan_root = root / "data" / f"runtime_scan_{tag}"
+
+    n_old = 0
+    if old_rows is not None:
+        n_old = len(old_rows)
+        if scan_root != extend_from:
+            if scan_root.exists():
+                raise FileExistsError(
+                    f"{scan_root} already exists -- refusing to overwrite it while "
+                    f"extending {extend_from.name}")
+            extend_from.rename(scan_root)
+
+    setup_dir   = scan_root / "setups"
+    output_root = scan_root / "gpu"
+    setup_dir.mkdir(parents=True, exist_ok=True)
+    output_root.mkdir(parents=True, exist_ok=True)
+    (root / "logs").mkdir(exist_ok=True)
+
+    params = BubbleMasterParams(
+        dz=None, wall_points=wall_points, n_w=n_omega, n_k=n_k,
+        how_often_ds=how_often_ds, baby_steps=baby_steps, cutoff_type=cutoff_type,
+        t_0_scal=1.0, collision_radius="mid",
+    )
+
+    manifest_rows = []
+    for index, gamma_ij in enumerate(gamma_ij_grid):
+        name = f"g{gamma_ij:08.3f}".replace(".", "p")
+        setup_path = setup_dir / f"{name}.h5"
+
+        if index < n_old:
+            # Existing row: extend its times[] in place to the new, larger
+            # T_MAX -- wlist/geometry/t_cut/t_m/t_max/smax stay exactly as
+            # they were, so the row's already-computed result_*.h5 files
+            # (and the plateau checkpoint embedded in the last one) remain
+            # valid seeds for the GPU binary's own auto-detection.
+            with h5py.File(setup_path, "r") as f:
+                old_last_time = float(f["times"][-1])
+                old_n_t = int(f.attrs["n_t"])
+            assert old_last_time < t_max, (
+                f"{setup_path.name}: existing last time {old_last_time:.3f} already >= "
+                f"new T_MAX={t_max:.3f} -- T_MAX should strictly grow with gamma_star_max")
+            n_new_t = int(np.ceil((t_max - old_last_time) / dt))
+            new_times = np.linspace(old_last_time, t_max, n_new_t + 1)[1:]
+            extend_2d_setup_times(setup_path, new_times)
+            n_t = old_n_t + len(new_times)
+        else:
+            # New row (gamma_ij beyond the old scan's range, or every row
+            # for a from-scratch scan): fresh.
+            t_first = time_at_gamma(gamma_ij)
+            if t_first >= t_max:
+                raise RuntimeError(f"Collision time exceeds T_MAX at gamma_ij={gamma_ij}")
+            n_t = int(np.ceil((t_max - t_first) / dt)) + 1
+            times = np.linspace(t_first, t_max, n_t)
+
+            smallest_target = max(gamma_star_min, gamma_ij / pair_gamma_factor)
+            omega_max = kR_max / rstar_at_gamma(smallest_target)
+            if omega_max <= omega_min:
+                raise RuntimeError(f"Empty omega range at gamma_ij={gamma_ij}")
+            omega = np.geomspace(omega_min, omega_max, n_omega)
+
+            write_2d_setup(model, gamma_ij, times, setup_path, params, wlist=omega)
+            with h5py.File(setup_path, "a") as handle:
+                handle.attrs["gamma_star_min"]         = gamma_star_min
+                handle.attrs["gamma_star_max"]         = gamma_star_max
+                handle.attrs["kR_min"]                 = kR_min
+                handle.attrs["kR_max"]                 = kR_max
+                handle.attrs["pair_gamma_factor"]      = pair_gamma_factor
+                handle.attrs["time_factor"]            = time_factor
+                handle.attrs["omega_min_gamma_factor"] = omega_min_gamma_factor
+                handle.attrs["R_star_max"]              = r_star_max
+
+        manifest_rows.append((index, gamma_ij, n_t, setup_path.relative_to(root), name))
+
+    manifest = scan_root / "manifest.tsv"
+    manifest.write_text(
+        "index\tgamma_ij\tn_t\tsetup\tname\n" +
+        "".join(f"{i}\t{g:.12g}\t{nt}\t{s}\t{n}\n" for i, g, nt, s, n in manifest_rows)
+    )
+
+    return SimpleNamespace(
+        root=root, tag=tag, scan_root=scan_root, setup_dir=setup_dir,
+        output_root=output_root, manifest=manifest, manifest_rows=manifest_rows,
+        gamma_ij_grid=gamma_ij_grid, n_old=n_old,
+        n_min=n_min, panels_per_oscillation=panels_per_oscillation, s_batch_size=s_batch_size,
+        t_max=t_max, r_star_max=r_star_max, omega_min=omega_min,
+    )
 
 
 # ---------------------------------------------------------------------------
