@@ -226,9 +226,15 @@ def query_spectrum(scan_data: SimpleNamespace, gamma_ij: float, t: float) -> tup
     against the same scan).
 
     Returns (k, spectrum): k is the lower-gamma_ij bracketing row's own
-    wlist (rows generally have different frequency grids; the higher row's
-    spectrum is projected onto this one -- zero outside its own range --
-    before combining, same convention already used in notebooks 05/06/16).
+    wlist, TRUNCATED to omega_max_hi = min(row_lo.wlist[-1], row_hi.wlist[-1])
+    -- omega_max shrinks with gamma_ij, so the higher row's own coverage is
+    usually the narrower one. Never extrapolated past what BOTH bracketing
+    rows actually computed: combining a real value from one row with a
+    zero-padded "row simply doesn't reach here" value from the other, in
+    log-space, would otherwise crash the result toward the floor right at
+    that edge -- not a physical feature, just missing data pretending to be
+    zero (caught by comparing a real extended-vs-direct scan: the last
+    couple of points were orders of magnitude below their neighbors).
     """
     rows = scan_data.rows
     gammas = np.array([r.gamma_ij for r in rows])
@@ -241,21 +247,25 @@ def query_spectrum(scan_data: SimpleNamespace, gamma_ij: float, t: float) -> tup
         ig_lo = ig_hi
 
     row_lo = rows[ig_lo]
-    spec_lo = _interp_row_at_t(row_lo, t)
-    k = row_lo.wlist
+    spec_lo_full = _interp_row_at_t(row_lo, t)
 
     if ig_lo == ig_hi:
-        return k, spec_lo
+        return row_lo.wlist, spec_lo_full
 
     row_hi = rows[ig_hi]
-    spec_hi = _interp_row_at_t(row_hi, t)
-    spec_hi_on_k = np.interp(k, row_hi.wlist, spec_hi, left=0., right=0.)
+    spec_hi_full = _interp_row_at_t(row_hi, t)
+
+    k_shared_max = min(row_lo.wlist[-1], row_hi.wlist[-1])
+    mask = row_lo.wlist <= k_shared_max
+    k = row_lo.wlist[mask]
+    spec_lo = spec_lo_full[mask]
+    spec_hi = np.interp(k, row_hi.wlist, spec_hi_full, left=0., right=0.)
 
     frac = (g - gammas[ig_lo]) / (gammas[ig_hi] - gammas[ig_lo])
-    floor = max(spec_lo.max(), spec_hi_on_k.max()) * 1e-12
+    floor = max(spec_lo.max(), spec_hi.max()) * 1e-12
     floor = max(floor, 1e-300)
     log_lo = np.log(np.maximum(spec_lo, floor))
-    log_hi = np.log(np.maximum(spec_hi_on_k, floor))
+    log_hi = np.log(np.maximum(spec_hi, floor))
     spectrum = np.exp(log_lo + frac * (log_hi - log_lo))
     return k, spectrum
 
