@@ -366,8 +366,9 @@ def generate_surrogate(model, root: Path, tag_label: str,
 
     Returns a SimpleNamespace: root, tag, scan_root, setup_dir, output_root,
     manifest, manifest_rows (list of (index, gamma_ij, n_t, setup_path,
-    name)), gamma_ij_grid, n_old, plus n_min/panels_per_oscillation/
-    s_batch_size (needed to build a bubblemaster_gpu command line) and
+    name)), gamma_ij_grid, n_old, model, params, plus n_min/
+    panels_per_oscillation/s_batch_size (needed to build a bubblemaster_gpu
+    command line) and
     t_max/r_star_max/omega_min (for a walltime estimate).
     """
     root = Path(root)
@@ -532,7 +533,7 @@ def generate_surrogate(model, root: Path, tag_label: str,
     return SimpleNamespace(
         root=root, tag=tag, scan_root=scan_root, setup_dir=setup_dir,
         output_root=output_root, manifest=manifest, manifest_rows=manifest_rows,
-        gamma_ij_grid=gamma_ij_grid, n_old=n_old,
+        gamma_ij_grid=gamma_ij_grid, n_old=n_old, model=model, params=params,
         n_min=n_min, panels_per_oscillation=panels_per_oscillation, s_batch_size=s_batch_size,
         t_max=t_max, r_star_max=r_star_max, omega_min=omega_min,
     )
