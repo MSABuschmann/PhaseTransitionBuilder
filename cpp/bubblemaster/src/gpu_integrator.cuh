@@ -226,6 +226,9 @@ private:
     // consecutive memory for a fixed iz.
     double *d_phi_    = nullptr;   // [n_z_ * max_alloc_]
     double *d_phi2_   = nullptr;   // [n_z_ * max_alloc_]
+    // (iz, i_s)-only intermediate for precompute_z_kernel's three sums --
+    // see precompute_derivatives_kernel. Layout [(iz*n_s_local+is)*6 + slot].
+    double *d_derivbuf_ = nullptr; // [n_z_ * max_alloc_ * 6]
 
     // --- RunEvolution()'s on-device field state (unused by the host-driven
     // ProcessBatch() path) ---

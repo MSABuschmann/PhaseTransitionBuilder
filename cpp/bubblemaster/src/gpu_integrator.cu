@@ -361,11 +361,64 @@ __device__ void filon_xyz_incremental(
 // finite-difference derivative, never as an output point itself.
 // ---------------------------------------------------------------------------
 
-__global__ void precompute_z_kernel(
+// Computes the (iz, i_s)-only building blocks of precompute_z_kernel's three
+// sums -- q1/q2 (zz, xa) and ds1*dz1/ds2*dz2 (xz) never actually depend on
+// (i_w, i_k), only the cos/sin WEIGHTS applied to them in precompute_z_kernel
+// do. Previously those derivatives were recomputed independently by every
+// one of the n_w*n_k threads sharing an (iz, i_s) -- up to ~1600x redundant
+// global-memory reads of phi/phi2 and redundant arithmetic. One thread per
+// (iz, i_s) here instead; precompute_z_kernel below reads the 6 results
+// (already squared/multiplied, since only the squared/product values are
+// ever used) instead of re-deriving them.
+__global__ void precompute_derivatives_kernel(
     const double * __restrict__ phi,     // [n_s * n_z]
     const double * __restrict__ phi2,    // [n_s * n_z]
-    int n_s, int n_z, int n_w, int n_k, int i_s_start,
+    int n_s, int n_z, int i_s_start,
     double ds, double dz,
+    double * __restrict__ derivbuf)      // [n_z * n_s * 6]
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n_z * n_s) return;
+    int i_s = idx % n_s;
+    int iz  = idx / n_s;
+    if (i_s < i_s_start) return;
+
+    double *out = derivbuf + idx * 6;
+
+    if (iz >= 1) {
+        double q1_zz = (phi [iz*n_s+i_s] - phi [(iz-1)*n_s+i_s]) / dz;
+        double q2_zz = (phi2[iz*n_s+i_s] - phi2[(iz-1)*n_s+i_s]) / dz;
+        out[0] = q1_zz * q1_zz;
+        out[1] = q2_zz * q2_zz;
+    } else {
+        out[0] = 0.; out[1] = 0.;
+    }
+
+    double q1_xa = (phi [iz*n_s+i_s] - phi [iz*n_s+(i_s-1)]) / ds;
+    double q2_xa = (phi2[iz*n_s+i_s] - phi2[iz*n_s+(i_s-1)]) / ds;
+    out[2] = q1_xa * q1_xa;
+    out[3] = q2_xa * q2_xa;
+
+    if (iz >= 1) {
+        double ds1 = 0.5/ds * (phi [iz*n_s+i_s]     - phi [iz*n_s+(i_s-1)]
+                              + phi [(iz-1)*n_s+i_s] - phi [(iz-1)*n_s+(i_s-1)]);
+        double dz1 = 0.5/dz * (phi [iz*n_s+i_s]     - phi [(iz-1)*n_s+i_s]
+                              + phi [iz*n_s+(i_s-1)] - phi [(iz-1)*n_s+(i_s-1)]);
+        double ds2 = 0.5/ds * (phi2[iz*n_s+i_s]     - phi2[iz*n_s+(i_s-1)]
+                              + phi2[(iz-1)*n_s+i_s] - phi2[(iz-1)*n_s+(i_s-1)]);
+        double dz2 = 0.5/dz * (phi2[iz*n_s+i_s]     - phi2[(iz-1)*n_s+i_s]
+                              + phi2[iz*n_s+(i_s-1)] - phi2[(iz-1)*n_s+(i_s-1)]);
+        out[4] = ds1 * dz1;
+        out[5] = ds2 * dz2;
+    } else {
+        out[4] = 0.; out[5] = 0.;
+    }
+}
+
+__global__ void precompute_z_kernel(
+    const double * __restrict__ derivbuf, // [n_z * n_s * 6], see precompute_derivatives_kernel
+    int n_s, int n_z, int n_w, int n_k, int i_s_start,
+    double dz,
     const double * __restrict__ z_arr,   // [n_z]
     const double * __restrict__ w_arr,   // [n_w]
     const double * __restrict__ k_arr,   // [n_k]
@@ -385,37 +438,28 @@ __global__ void precompute_z_kernel(
 
     double iz1_zz = 0., iz2_zz = 0.;
     for (int iz = 1; iz < n_z; ++iz) {
-        double zm   = z_arr[iz] - dz * 0.5;
-        double czm  = cos(w * k * zm);
-        double q1   = (phi [iz*n_s + i_s] - phi [(iz-1)*n_s + i_s]) / dz;
-        double q2   = (phi2[iz*n_s + i_s] - phi2[(iz-1)*n_s + i_s]) / dz;
-        iz1_zz += dz * 2.0 * czm * q1 * q1;
-        iz2_zz += dz * 2.0 * czm * q2 * q2;
+        double zm  = z_arr[iz] - dz * 0.5;
+        double czm = cos(w * k * zm);
+        const double *d = derivbuf + (iz*n_s + i_s) * 6;
+        iz1_zz += dz * 2.0 * czm * d[0];
+        iz2_zz += dz * 2.0 * czm * d[1];
     }
 
     double iz1_xa = 0., iz2_xa = 0.;
     for (int iz = 0; iz < n_z; ++iz) {
-        double fz  = (iz == 0 || iz == n_z-1) ? 0.5 : 1.0;
-        double cz  = cos(w * k * z_arr[iz]);
-        double q1  = (phi [iz*n_s + i_s] - phi [iz*n_s + (i_s-1)]) / ds;
-        double q2  = (phi2[iz*n_s + i_s] - phi2[iz*n_s + (i_s-1)]) / ds;
-        iz1_xa += fz * dz * 2.0 * cz * q1 * q1;
-        iz2_xa += fz * dz * 2.0 * cz * q2 * q2;
+        double fz = (iz == 0 || iz == n_z-1) ? 0.5 : 1.0;
+        double cz = cos(w * k * z_arr[iz]);
+        const double *d = derivbuf + (iz*n_s + i_s) * 6;
+        iz1_xa += fz * dz * 2.0 * cz * d[2];
+        iz2_xa += fz * dz * 2.0 * cz * d[3];
     }
 
     double iz1_xz = 0., iz2_xz = 0.;
     for (int iz = 1; iz < n_z; ++iz) {
-        double szm  = sin(w * k * (z_arr[iz] - dz * 0.5));
-        double ds1  = 0.5/ds * (phi [iz*n_s+i_s]     - phi [iz*n_s+(i_s-1)]
-                               + phi [(iz-1)*n_s+i_s] - phi [(iz-1)*n_s+(i_s-1)]);
-        double dz1  = 0.5/dz * (phi [iz*n_s+i_s]     - phi [(iz-1)*n_s+i_s]
-                               + phi [iz*n_s+(i_s-1)] - phi [(iz-1)*n_s+(i_s-1)]);
-        double ds2  = 0.5/ds * (phi2[iz*n_s+i_s]     - phi2[iz*n_s+(i_s-1)]
-                               + phi2[(iz-1)*n_s+i_s] - phi2[(iz-1)*n_s+(i_s-1)]);
-        double dz2  = 0.5/dz * (phi2[iz*n_s+i_s]     - phi2[(iz-1)*n_s+i_s]
-                               + phi2[iz*n_s+(i_s-1)] - phi2[(iz-1)*n_s+(i_s-1)]);
-        iz1_xz += dz * 2.0 * szm * ds1 * dz1;
-        iz2_xz += dz * 2.0 * szm * ds2 * dz2;
+        double szm = sin(w * k * (z_arr[iz] - dz * 0.5));
+        const double *d = derivbuf + (iz*n_s + i_s) * 6;
+        iz1_xz += dz * 2.0 * szm * d[4];
+        iz2_xz += dz * 2.0 * szm * d[5];
     }
 
     double *out = zbuf + idx * 6;
@@ -774,6 +818,7 @@ GpuIntegrator::GpuIntegrator(const Setup &setup, int param,
 
     CUDA_CHECK(cudaMalloc(&d_phi_,  n_z_ * max_alloc_ * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_phi2_, n_z_ * max_alloc_ * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_derivbuf_, n_z_ * max_alloc_ * 6 * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_s_,    max_alloc_ * sizeof(double)));
 
     CUDA_CHECK(cudaMalloc(&d_phi_cur_,    n_z_ * sizeof(double)));
@@ -818,6 +863,7 @@ GpuIntegrator::~GpuIntegrator()
 {
     cudaFree(d_phi_);
     cudaFree(d_phi2_);
+    cudaFree(d_derivbuf_);
     cudaFree(d_z_);
     cudaFree(d_w_);
     cudaFree(d_k_);
@@ -1003,11 +1049,19 @@ void GpuIntegrator::ProcessUploadedBatch(int n_s_local, const std::vector<double
     // extend run only requests a few new cutoff times (it runs once per
     // batch regardless of n_t_, unlike gw_kernel).
     const auto t_precompute = std::chrono::steady_clock::now();
+    {
+        const int total_zs  = static_cast<int>(n_z_) * n_s_local;
+        const int grid_deriv = (total_zs + BLOCK - 1) / BLOCK;
+        precompute_derivatives_kernel<<<grid_deriv, BLOCK>>>(
+            d_phi_, d_phi2_, n_s_local, static_cast<int>(n_z_), i_s_start,
+            ds_, dz_, d_derivbuf_);
+        CUDA_CHECK(cudaGetLastError());
+    }
     CUDA_CHECK(cudaMemset(d_zbuf_, 0, total * 6 * sizeof(double)));
     precompute_z_kernel<<<grid, BLOCK>>>(
-        d_phi_, d_phi2_, n_s_local, static_cast<int>(n_z_),
+        d_derivbuf_, n_s_local, static_cast<int>(n_z_),
         static_cast<int>(n_w_), static_cast<int>(n_k_), i_s_start,
-        ds_, dz_, d_z_, d_w_, d_k_, d_zbuf_);
+        dz_, d_z_, d_w_, d_k_, d_zbuf_);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     const double precompute_seconds = std::chrono::duration<double>(
