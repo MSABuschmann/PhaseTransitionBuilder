@@ -4,7 +4,6 @@
 #include <optional>
 #include <vector>
 #include "amplitude.h"
-#include "interpolator.h"
 #include "setup.h"
 
 // Drop-in-ish replacement for Integrator / FilonIntegrator that runs the
@@ -164,11 +163,6 @@ private:
     static std::vector<double> linspace (double a, double b, int n);
     static std::vector<double> geomspace(double a, double b, std::size_t n);
 
-    // Fills phi2_host (size n_z_ * batch_s.size(), [iz*n_batch+is] layout)
-    // using the persistent phi0_interp_ built once in the constructor.
-    void build_phi2_batch(const std::vector<double> &batch_s,
-                          std::vector<double> &phi2_host) const;
-
     // Format-B skip bookkeeping, shared by ProcessBatch() (host-driven) and
     // RunEvolution() (device-driven) so both respect skip_until_ identically
     // -- see next_batch_index_/skip_until_'s doc comment below. Returns true
@@ -212,14 +206,16 @@ private:
     int s_batch_size_;   // requested new-slices-per-batch
     int max_alloc_;       // = s_batch_size_ + 1 (room for the halo slice)
 
-    // Fixed (t=0) two-bubble reference-field interpolant, built once in the
-    // constructor directly from setup.phi0/setup.z (build_phi2's original
-    // logic only ever reads input_phi[0], i.e. the t=0 profile -- it has no
-    // dependence on the evolved history). Interpolator stores REFERENCES to
-    // its inputs, so z0_new_/phi0_new_ must outlive it as persistent members,
-    // declared before phi0_interp_ so they're constructed first.
-    std::vector<double> z0_new_, phi0_new_;
-    std::optional<Interpolator> phi0_interp_;
+    // Fixed (t=0) two-bubble reference-field profile table, uploaded to
+    // device once in the constructor directly from setup.phi0/setup.z
+    // (build_phi2_kernel's original logic only ever reads input_phi[0], i.e.
+    // the t=0 profile -- it has no dependence on the evolved history).
+    // build_phi2_kernel interpolates on this table directly on-device (see
+    // device_interp in gpu_integrator.cu) -- no host-side Interpolator
+    // object needed anymore.
+    double *d_prof_z_   = nullptr;   // [n_prof_]
+    double *d_prof_phi_ = nullptr;   // [n_prof_]
+    int n_prof_ = 0;
 
     // Device arrays: allocated ONCE in the constructor at max_alloc_
     // (batch-sized, not full-s-grid-sized) and reused for every

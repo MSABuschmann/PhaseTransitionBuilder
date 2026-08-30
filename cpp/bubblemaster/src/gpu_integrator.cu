@@ -740,19 +740,21 @@ GpuIntegrator::GpuIntegrator(const Setup &setup, int param,
         skip_until_    = resume->batches_done;
     }
 
-    // --- Build the persistent phi0 interpolator directly from setup.phi0 ---
-    // (build_phi2's original logic only ever read input_phi[0], i.e. the t=0
-    // profile identical to setup.phi0 -- this has zero dependence on the
-    // evolved history, so it can be built once here instead of per-batch.)
+    // --- Build the phi0 profile table directly from setup.phi0 ---
+    // (build_phi2_kernel's original logic only ever read input_phi[0], i.e.
+    // the t=0 profile identical to setup.phi0 -- this has zero dependence on
+    // the evolved history, so it's built once here instead of per-batch.)
+    // Local, not persistent members: build_phi2_kernel interpolates on-device
+    // now (see device_interp), so this table only needs to exist long enough
+    // to upload it to d_prof_z_/d_prof_phi_ below.
     auto max_it = std::max_element(setup.phi0.begin(), setup.phi0.end());
     int phimid  = static_cast<int>(max_it - setup.phi0.begin());
 
-    z0_new_.assign(z_.begin() + phimid, z_.end());
-    double z0 = z0_new_[0];
-    for (double &zi : z0_new_) zi -= z0;
-
-    phi0_new_.assign(setup.phi0.begin() + phimid, setup.phi0.end());
-    phi0_interp_.emplace(z0_new_, phi0_new_);
+    std::vector<double> z0_new(z_.begin() + phimid, z_.end());
+    double z0 = z0_new[0];
+    for (double &zi : z0_new) zi -= z0;
+    std::vector<double> phi0_new(setup.phi0.begin() + phimid, setup.phi0.end());
+    n_prof_ = static_cast<int>(z0_new.size());
 
     int dev;
     CUDA_CHECK(cudaGetDevice(&dev));
@@ -784,6 +786,11 @@ GpuIntegrator::GpuIntegrator(const Setup &setup, int param,
     CUDA_CHECK(cudaMemcpy(d_w_, wlist_.data(), n_w_ * sizeof(double), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMalloc(&d_k_, n_k_ * sizeof(double)));
     CUDA_CHECK(cudaMemcpy(d_k_, klist_.data(), n_k_ * sizeof(double), cudaMemcpyHostToDevice));
+
+    CUDA_CHECK(cudaMalloc(&d_prof_z_,   n_prof_ * sizeof(double)));
+    CUDA_CHECK(cudaMemcpy(d_prof_z_,   z0_new.data(),   n_prof_ * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMalloc(&d_prof_phi_, n_prof_ * sizeof(double)));
+    CUDA_CHECK(cudaMemcpy(d_prof_phi_, phi0_new.data(), n_prof_ * sizeof(double), cudaMemcpyHostToDevice));
 
     const std::size_t batch_total = n_w_ * n_k_ * static_cast<std::size_t>(max_alloc_);
     CUDA_CHECK(cudaMalloc(&d_zbuf_,   batch_total * 6  * sizeof(double)));
@@ -818,6 +825,8 @@ GpuIntegrator::~GpuIntegrator()
     cudaFree(d_phi_cur_);
     cudaFree(d_pi_cur_);
     cudaFree(d_phi_evolve_);
+    cudaFree(d_prof_z_);
+    cudaFree(d_prof_phi_);
     cudaFree(d_zbuf_);
     cudaFree(d_intbuf_);
     cudaFree(d_plateau_intbuf_);
@@ -828,26 +837,50 @@ GpuIntegrator::~GpuIntegrator()
 }
 
 // ---------------------------------------------------------------------------
-// phi2 construction, per batch (CPU) -- reuses the persistent phi0_interp_
-// built once in the constructor; the math is otherwise identical to the
-// original build_phi2 (cu, pre-rewrite), just evaluated over the batch's own
-// s values instead of the full [0, n_s) range.
+// phi2 construction, per batch, entirely on-device -- writes straight into
+// d_phi2_ (no host loop, no upload). device_interp mirrors Interpolator::
+// operator() exactly (same linear-interpolation-by-binary-search, same
+// clamping at the table's ends); d_prof_z_/d_prof_phi_ are the profile
+// table, uploaded once in the constructor (see GpuIntegrator::GpuIntegrator).
+// Was previously a single-threaded host loop (build_phi2_batch) -- for the
+// expensive high-gamma_ij rows this cost as much as precompute_z_kernel
+// itself (see git history for the "Timing phase=batch"'s phi2_build_seconds
+// field that measured it).
 // ---------------------------------------------------------------------------
 
-void GpuIntegrator::build_phi2_batch(const std::vector<double> &batch_s,
-                                      std::vector<double> &phi2_host) const
+__device__ __forceinline__ double device_interp(
+    double xi, const double * __restrict__ x, const double * __restrict__ y, int n)
 {
-    const std::size_t n_batch = batch_s.size();
-    phi2_host.resize(n_batch * n_z_);
-    for (std::size_t is = 0; is < n_batch; ++is) {
-        double s_val = batch_s[is];
-        for (std::size_t iz = 0; iz < n_z_; ++iz) {
-            double z_val = iz * dz_;
-            double r1 = std::sqrt(s_val*s_val + (z_val - d_/2.)*(z_val - d_/2.));
-            double r2 = std::sqrt(s_val*s_val + (z_val + d_/2.)*(z_val + d_/2.));
-            phi2_host[iz * n_batch + is] = (*phi0_interp_)(r1) + (*phi0_interp_)(r2);
-        }
+    if (xi <= x[0])     return y[0];
+    if (xi >= x[n - 1])  return y[n - 1];
+    int lo = 0, hi = n;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (x[mid] < xi) lo = mid + 1;
+        else             hi = mid;
     }
+    int idx = lo - 1;
+    double x0 = x[idx], x1 = x[idx + 1];
+    double y0 = y[idx], y1 = y[idx + 1];
+    return y0 + (xi - x0) * (y1 - y0) / (x1 - x0);
+}
+
+__global__ void build_phi2_kernel(
+    const double * __restrict__ s_arr, int n_s, int n_z, double dz, double d,
+    const double * __restrict__ prof_x, const double * __restrict__ prof_y, int n_prof,
+    double * __restrict__ phi2)   // [n_z * n_s], layout [iz*n_s+is]
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n_z * n_s) return;
+    int is = idx % n_s;
+    int iz = idx / n_s;
+
+    double s_val = s_arr[is];
+    double z_val = iz * dz;
+    double r1 = sqrt(s_val*s_val + (z_val - d/2.)*(z_val - d/2.));
+    double r2 = sqrt(s_val*s_val + (z_val + d/2.)*(z_val + d/2.));
+    phi2[iz * n_s + is] = device_interp(r1, prof_x, prof_y, n_prof)
+                        + device_interp(r2, prof_x, prof_y, n_prof);
 }
 
 // ---------------------------------------------------------------------------
@@ -934,23 +967,28 @@ void GpuIntegrator::ProcessUploadedBatch(int n_s_local, const std::vector<double
 
     const auto t_batch = std::chrono::steady_clock::now();
 
-    // --- Build phi2 for this batch on the host ---
-    // Diagnostic timer: build_phi2_batch is a single-threaded host loop (no
-    // OpenMP, no GPU) doing ~n_z_*n_s_local scalar interpolator evaluations
-    // -- suspected as the largest untimed contributor to gpu_integration's
-    // total (see "Timing phase=batch"'s phi2_build_seconds field below).
-    const auto t_phi2 = std::chrono::steady_clock::now();
-    std::vector<double> phi2_host;
-    build_phi2_batch(batch_s, phi2_host);
-    const double phi2_build_seconds = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - t_phi2).count();
-
-    // --- Upload this batch's phi2/s (phi is already in d_phi_) ---
+    // --- Upload this batch's s (phi is already in d_phi_) ---
     const auto t_upload = std::chrono::steady_clock::now();
-    CUDA_CHECK(cudaMemcpy(d_phi2_, phi2_host.data(), phi2_host.size() * sizeof(double), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_s_,    batch_s.data(),   batch_s.size()   * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_s_, batch_s.data(), batch_s.size() * sizeof(double), cudaMemcpyHostToDevice));
     const double upload_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - t_upload).count();
+
+    // --- Build phi2 for this batch directly on-device (see build_phi2_kernel) ---
+    // Own explicit sync for accurate diagnostic timing, same reasoning as
+    // precompute_seconds below.
+    const auto t_phi2 = std::chrono::steady_clock::now();
+    {
+        const int total_zs   = static_cast<int>(n_z_) * n_s_local;
+        constexpr int BLOCK_PHI2 = 256;
+        const int grid_phi2  = (total_zs + BLOCK_PHI2 - 1) / BLOCK_PHI2;
+        build_phi2_kernel<<<grid_phi2, BLOCK_PHI2>>>(
+            d_s_, n_s_local, static_cast<int>(n_z_), dz_, d_,
+            d_prof_z_, d_prof_phi_, n_prof_, d_phi2_);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
+    const double phi2_build_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t_phi2).count();
 
     const std::size_t total = n_w_ * n_k_ * static_cast<std::size_t>(n_s_local);
     constexpr int BLOCK = 256;
