@@ -11,6 +11,8 @@
 
 #include <cuda_runtime.h>
 
+#include "../../common/potential.h"
+
 // ---------------------------------------------------------------------------
 // CUDA error helper
 // ---------------------------------------------------------------------------
@@ -568,6 +570,107 @@ __global__ void gw_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// On-device field evolution (RunEvolution()'s kernels)
+//
+// device_dV/evolve_pi_kernel/phi_update_kernel are the GPU equivalent of
+// Evolution::EvolvePi and its phi update (evolution.cpp) -- same stencil,
+// same boundary clamping, same leapfrog-style pi update. CUDA device code
+// can't dispatch through a host-constructed Potential* vtable, so
+// device_dV switches on DevicePotentialParams::kind instead (see
+// cpp/common/potential.h's to_device_params()).
+//
+// write_snapshot_kernel/repack_batch_kernel/carry_halo_kernel manage
+// d_phi_evolve_, the fixed-max_alloc_-stride staging buffer RunEvolution()
+// writes new snapshots into one at a time (its final size, n_s_local, isn't
+// known until a batch closes, so it can't be written directly into d_phi_'s
+// tightly-packed [iz*n_s_local+is] layout the way ProcessBatch()'s host
+// upload can) -- repack_batch_kernel copies a closed batch's first
+// n_s_local columns into d_phi_ unchanged, so precompute_z_kernel/gw_kernel
+// need no modification at all.
+// ---------------------------------------------------------------------------
+
+__device__ __forceinline__ double device_dV(double phi, DevicePotentialParams pot)
+{
+    switch (pot.kind) {
+    case PotentialKind::kPhi4:
+        return 2.*pot.c[0]*phi + 3.*pot.c[1]*phi*phi + 4.*pot.c[2]*phi*phi*phi;
+    case PotentialKind::kPhi4Piecewise:
+        if (phi <= pot.c[3])
+            return 2.*pot.c[0]*phi + 3.*pot.c[1]*phi*phi + 4.*pot.c[2]*phi*phi*phi;
+        return pot.c[4]*pot.c[4]*(phi - pot.c[5]);
+    case PotentialKind::kPolynomial:
+        return phi*phi*phi - phi*phi + (2./9.)*pot.c[0]*phi;
+    }
+    return 0.;   // unreachable
+}
+
+// One thread per z. Reads phi (read-only this kernel), writes a new pi in
+// place -- matches Evolution::EvolvePi exactly, including the i_z==0/n_z-1
+// boundary clamp (reflecting boundary conditions).
+__global__ void evolve_pi_kernel(
+    const double * __restrict__ phi, double * __restrict__ pi,
+    int n_z, double dz, double s, double step, DevicePotentialParams pot)
+{
+    int iz = blockIdx.x * blockDim.x + threadIdx.x;
+    if (iz >= n_z) return;
+
+    double phiprev = (iz != 0)     ? phi[iz-1] : phi[1];
+    double phinext = (iz != n_z-1) ? phi[iz+1] : phi[n_z-2];
+    double lap = (phiprev - 2.*phi[iz] + phinext) / (dz*dz);
+    double dv  = device_dV(phi[iz], pot);
+
+    double fac_pi  = 1. - 2.*step/(s+step);
+    double fac_src =      s*step/(s+step);
+    pi[iz] = pi[iz]*fac_pi + fac_src*(lap - dv);
+}
+
+// One thread per z. phi[iz] += step*pi[iz] -- matches Evolution::Evolve()'s
+// phi update exactly.
+__global__ void phi_update_kernel(
+    double * __restrict__ phi, const double * __restrict__ pi,
+    int n_z, double step)
+{
+    int iz = blockIdx.x * blockDim.x + threadIdx.x;
+    if (iz >= n_z) return;
+    phi[iz] += step * pi[iz];
+}
+
+// One thread per z. stage[iz*max_alloc+is_local] = phi_cur[iz].
+__global__ void write_snapshot_kernel(
+    const double * __restrict__ phi_cur, double * __restrict__ stage,
+    int n_z, int max_alloc, int is_local)
+{
+    int iz = blockIdx.x * blockDim.x + threadIdx.x;
+    if (iz >= n_z) return;
+    stage[iz * max_alloc + is_local] = phi_cur[iz];
+}
+
+// One thread per (iz,is) pair, is in [0,n_s_local). Copies stage's first
+// n_s_local columns (fixed max_alloc_ stride) into dst's tightly-packed
+// [iz*n_s_local+is] layout -- dst is d_phi_, unchanged from ProcessBatch()'s
+// own expectations.
+__global__ void repack_batch_kernel(
+    const double * __restrict__ stage, double * __restrict__ dst,
+    int n_z, int max_alloc, int n_s_local)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n_z * n_s_local) return;
+    int is = idx % n_s_local;
+    int iz = idx / n_s_local;
+    dst[iz * n_s_local + is] = stage[iz * max_alloc + is];
+}
+
+// One thread per z. Same-buffer column copy: stage[:,to_is] = stage[:,from_is]
+// -- used to carry the last-written slice forward as the next batch's halo.
+__global__ void carry_halo_kernel(
+    double * __restrict__ stage, int n_z, int max_alloc, int from_is, int to_is)
+{
+    int iz = blockIdx.x * blockDim.x + threadIdx.x;
+    if (iz >= n_z) return;
+    stage[iz * max_alloc + to_is] = stage[iz * max_alloc + from_is];
+}
+
+// ---------------------------------------------------------------------------
 // Constructor
 // ---------------------------------------------------------------------------
 
@@ -671,6 +774,10 @@ GpuIntegrator::GpuIntegrator(const Setup &setup, int param,
     CUDA_CHECK(cudaMalloc(&d_phi2_, n_z_ * max_alloc_ * sizeof(double)));
     CUDA_CHECK(cudaMalloc(&d_s_,    max_alloc_ * sizeof(double)));
 
+    CUDA_CHECK(cudaMalloc(&d_phi_cur_,    n_z_ * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_pi_cur_,     n_z_ * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_phi_evolve_, n_z_ * max_alloc_ * sizeof(double)));
+
     CUDA_CHECK(cudaMalloc(&d_z_, n_z_ * sizeof(double)));
     CUDA_CHECK(cudaMemcpy(d_z_, z_.data(), n_z_ * sizeof(double), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMalloc(&d_w_, n_w_ * sizeof(double)));
@@ -708,6 +815,9 @@ GpuIntegrator::~GpuIntegrator()
     cudaFree(d_w_);
     cudaFree(d_k_);
     cudaFree(d_s_);
+    cudaFree(d_phi_cur_);
+    cudaFree(d_pi_cur_);
+    cudaFree(d_phi_evolve_);
     cudaFree(d_zbuf_);
     cudaFree(d_intbuf_);
     cudaFree(d_plateau_intbuf_);
@@ -749,14 +859,8 @@ void GpuIntegrator::build_phi2_batch(const std::vector<double> &batch_s,
 // linear contribution into the persistent, batch-independent accum_.
 // ---------------------------------------------------------------------------
 
-void GpuIntegrator::ProcessBatch(const std::vector<std::vector<double>> &batch_phi,
-                                 const std::vector<double> &batch_s,
-                                 bool is_first_batch, bool is_last_batch)
+bool GpuIntegrator::AdvanceAndCheckSkip(bool is_last_batch)
 {
-    if (finalized_)
-        throw std::runtime_error(
-            "GpuIntegrator::ProcessBatch called after the last batch was already processed");
-
     // --- Format-B resume: skip batches already folded into accum_/accum_plateau_ ---
     // Field evolution still regenerates this batch's data (main.cpp restarts
     // it from s=0 every run -- cheap), but it's never uploaded or handed to
@@ -769,8 +873,21 @@ void GpuIntegrator::ProcessBatch(const std::vector<std::vector<double>> &batch_p
     if (this_batch < skip_until_) {
         if (is_last_batch)
             finalized_ = true;
-        return;
+        return true;
     }
+    return false;
+}
+
+void GpuIntegrator::ProcessBatch(const std::vector<std::vector<double>> &batch_phi,
+                                 const std::vector<double> &batch_s,
+                                 bool is_first_batch, bool is_last_batch)
+{
+    if (finalized_)
+        throw std::runtime_error(
+            "GpuIntegrator::ProcessBatch called after the last batch was already processed");
+
+    if (AdvanceAndCheckSkip(is_last_batch))
+        return;
 
     const int n_s_local = static_cast<int>(batch_phi.size());
     if (n_s_local < 1 || n_s_local > max_alloc_)
@@ -778,6 +895,29 @@ void GpuIntegrator::ProcessBatch(const std::vector<std::vector<double>> &batch_p
             "GpuIntegrator::ProcessBatch: batch size " + std::to_string(n_s_local) +
             " out of range (1.." + std::to_string(max_alloc_) + ")");
 
+    // --- Flatten phi to host 1-D array, transposed to [iz*n_s_local+is] ---
+    std::vector<double> phi_host(static_cast<std::size_t>(n_s_local) * n_z_);
+    for (int is = 0; is < n_s_local; ++is)
+        for (std::size_t iz = 0; iz < n_z_; ++iz)
+            phi_host[iz * n_s_local + is] = batch_phi[is][iz];
+    CUDA_CHECK(cudaMemcpy(d_phi_, phi_host.data(), phi_host.size() * sizeof(double), cudaMemcpyHostToDevice));
+
+    ProcessUploadedBatch(n_s_local, batch_s, is_first_batch, is_last_batch);
+}
+
+// ---------------------------------------------------------------------------
+// ProcessUploadedBatch -- shared tail of ProcessBatch()/RunEvolution().
+// Assumes d_phi_'s first n_z_*n_s_local doubles are ALREADY populated (by
+// whichever caller); builds/uploads phi2 and s, computes this batch's
+// z-integrals once, then loops ALL cutoff times internally (the incremental
+// plateau/transition-window algorithm is preserved exactly, just scoped to
+// this batch's cum state instead of the whole run's), folding each cutoff's
+// linear contribution into the persistent, batch-independent accum_.
+// ---------------------------------------------------------------------------
+
+void GpuIntegrator::ProcessUploadedBatch(int n_s_local, const std::vector<double> &batch_s,
+                                         bool is_first_batch, bool is_last_batch)
+{
     // Local index 0 is ALWAYS skipped as an output/accumulation point,
     // regardless of is_first_batch: in batch 0 it's the true global s=0
     // sample (no i_s-1 predecessor exists, so no s-derivative can be formed
@@ -794,18 +934,11 @@ void GpuIntegrator::ProcessBatch(const std::vector<std::vector<double>> &batch_p
 
     const auto t_batch = std::chrono::steady_clock::now();
 
-    // --- Flatten phi to host 1-D array, transposed to [iz*n_s_local+is] ---
-    std::vector<double> phi_host(static_cast<std::size_t>(n_s_local) * n_z_);
-    for (int is = 0; is < n_s_local; ++is)
-        for (std::size_t iz = 0; iz < n_z_; ++iz)
-            phi_host[iz * n_s_local + is] = batch_phi[is][iz];
-
     // --- Build phi2 for this batch on the host ---
     std::vector<double> phi2_host;
     build_phi2_batch(batch_s, phi2_host);
 
-    // --- Upload this batch's phi/phi2/s (reusing the persistent buffers) ---
-    CUDA_CHECK(cudaMemcpy(d_phi_,  phi_host.data(),  phi_host.size()  * sizeof(double), cudaMemcpyHostToDevice));
+    // --- Upload this batch's phi2/s (phi is already in d_phi_) ---
     CUDA_CHECK(cudaMemcpy(d_phi2_, phi2_host.data(), phi2_host.size() * sizeof(double), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_s_,    batch_s.data(),   batch_s.size()   * sizeof(double), cudaMemcpyHostToDevice));
 
@@ -909,6 +1042,128 @@ void GpuIntegrator::ProcessBatch(const std::vector<std::vector<double>> &batch_p
 
     if (is_last_batch)
         finalized_ = true;
+}
+
+// ---------------------------------------------------------------------------
+// RunEvolution -- on-device field evolution (s=0..smax), streamed straight
+// into ProcessUploadedBatch() at the same cadence Evolution+SBatchWindow use
+// on the CPU path. Mirrors Evolution::Evolve()'s exact step/snapshot
+// sequence (evolution.cpp) and SBatchWindow's exact batching/halo bookkeeping
+// (s_batch_window.h) -- see gpu_integrator.cuh's doc comment. Must stay in
+// lockstep with both if either changes.
+// ---------------------------------------------------------------------------
+
+void GpuIntegrator::RunEvolution(const Setup &setup,
+                                 std::function<void(bool)> on_batch_boundary)
+{
+    const auto t_run = std::chrono::steady_clock::now();
+    double integration_seconds = 0.;
+
+    const int n_z = static_cast<int>(n_z_);
+    const double ds = setup.ds;
+    const int how_often_ds = setup.how_often_ds;
+    const int baby_steps   = setup.baby_steps;
+    const int n_steps = std::max(1, static_cast<int>(std::round(setup.smax / ds)));
+    const int last_saved_i = (n_steps / how_often_ds) * how_often_ds;
+    const int batch_size = s_batch_size_;
+
+    constexpr int BLOCK = 256;
+    const int grid_z = (n_z + BLOCK - 1) / BLOCK;
+
+    const DevicePotentialParams pp = setup.potential->to_device_params();
+
+    CUDA_CHECK(cudaMemcpy(d_phi_cur_, setup.phi0.data(), n_z_ * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemset(d_pi_cur_, 0, n_z_ * sizeof(double)));
+
+    // --- Batch bookkeeping, mirrors SBatchWindow::Push exactly, but writes
+    // snapshots into d_phi_evolve_ instead of buffering host vectors. ---
+    int  is_local         = 0;
+    bool first_batch_done = false;
+    std::vector<double> batch_s;
+    batch_s.reserve(static_cast<std::size_t>(max_alloc_));
+
+    auto push_snapshot = [&](double s, bool is_last_snapshot) {
+        write_snapshot_kernel<<<grid_z, BLOCK>>>(d_phi_cur_, d_phi_evolve_, n_z, max_alloc_, is_local);
+        CUDA_CHECK(cudaGetLastError());
+        batch_s.push_back(s);
+        ++is_local;
+
+        const int new_count = is_local - (first_batch_done ? 1 : 0);
+        if (new_count < batch_size && !is_last_snapshot)
+            return;
+
+        const int n_s_local       = is_local;
+        const bool is_first_batch = !first_batch_done;
+
+        if (!AdvanceAndCheckSkip(is_last_snapshot)) {
+            const auto t_int = std::chrono::steady_clock::now();
+            const int total_zs   = n_z * n_s_local;
+            const int grid_repack = (total_zs + BLOCK - 1) / BLOCK;
+            repack_batch_kernel<<<grid_repack, BLOCK>>>(
+                d_phi_evolve_, d_phi_, n_z, max_alloc_, n_s_local);
+            CUDA_CHECK(cudaGetLastError());
+            ProcessUploadedBatch(n_s_local, batch_s, is_first_batch, is_last_snapshot);
+            integration_seconds += std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - t_int).count();
+        }
+        first_batch_done = true;
+
+        if (on_batch_boundary)
+            on_batch_boundary(is_last_snapshot);
+
+        if (is_last_snapshot) {
+            batch_s.clear();
+            is_local = 0;
+            return;
+        }
+
+        // --- Carry the last-written slice forward as the next batch's halo. ---
+        carry_halo_kernel<<<grid_z, BLOCK>>>(d_phi_evolve_, n_z, max_alloc_, n_s_local - 1, 0);
+        CUDA_CHECK(cudaGetLastError());
+        const double halo_s = batch_s.back();
+        batch_s.clear();
+        batch_s.push_back(halo_s);
+        is_local = 1;
+    };
+
+    // --- Initial snapshot: s=0, phi=phi0 (BEFORE any stepping), matching
+    // the CPU constructor's sink_(phi, 0., last_saved_i_ == 0). ---
+    push_snapshot(0., last_saved_i == 0);
+
+    // --- Baby-step bootstrap (matches EvolvepiFirstHalfStep exactly -- no
+    // snapshot taken during this phase, matching the CPU original). ---
+    {
+        const double baby_ds = (0.5 * ds) / static_cast<double>(baby_steps - 1);
+        for (int i = 1; i < baby_steps; ++i) {
+            const double s = (i - 1) * baby_ds;
+            evolve_pi_kernel<<<grid_z, BLOCK>>>(d_phi_cur_, d_pi_cur_, n_z, dz_, s, baby_ds, pp);
+            CUDA_CHECK(cudaGetLastError());
+            phi_update_kernel<<<grid_z, BLOCK>>>(d_phi_cur_, d_pi_cur_, n_z, baby_ds);
+            CUDA_CHECK(cudaGetLastError());
+        }
+    }
+
+    // --- Main loop (matches Evolve() exactly, including skipping the pi
+    // update at i==1 -- pi is carried over from the baby-step bootstrap). ---
+    for (int i = 1; i <= n_steps; ++i) {
+        if (i > 1) {
+            const double s = (i - 1) * ds;
+            evolve_pi_kernel<<<grid_z, BLOCK>>>(d_phi_cur_, d_pi_cur_, n_z, dz_, s, ds, pp);
+            CUDA_CHECK(cudaGetLastError());
+        }
+        phi_update_kernel<<<grid_z, BLOCK>>>(d_phi_cur_, d_pi_cur_, n_z, ds);
+        CUDA_CHECK(cudaGetLastError());
+
+        if (i % how_often_ds == 0)
+            push_snapshot(i * ds, i == last_saved_i);
+    }
+
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    const double total_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t_run).count();
+    std::cout << "Timing phase=field_evolution seconds=" << (total_seconds - integration_seconds) << "\n";
+    std::cout << "Timing phase=gpu_integration seconds=" << integration_seconds << "\n";
 }
 
 // ---------------------------------------------------------------------------

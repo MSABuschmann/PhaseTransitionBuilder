@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <vector>
 #include "amplitude.h"
@@ -15,9 +16,12 @@
 // (see ProcessBatch) so device memory scales with a small, fixed batch size
 // rather than with the full s-grid — the full history plus its z/w/k-indexed
 // buffers scale roughly as gamma_ij^4 and become infeasible on a single GPU
-// well before gamma_ij=32/64. main.cpp streams Evolution's snapshots through an SBatchWindow
-// into ProcessBatch(); once every batch has been processed, Finalize(i_t)/
-// FinalizeAmplitude(i_t) read out the accumulated result per cutoff time.
+// well before gamma_ij=32/64. main.cpp drives this via RunEvolution(), which
+// runs the field evolution itself on-device and feeds it straight into the
+// same per-batch processing ProcessBatch() exposes for callers that already
+// have their own (CPU-computed) batches; once every batch has been
+// processed, Finalize(i_t)/FinalizeAmplitude(i_t) read out the accumulated
+// result per cutoff time.
 //
 // Architecture (one CUDA thread per (i_w, i_k, i_s_local) triple within a batch):
 //   - Streaming Filon u-integral: no array allocation, accumulators live in
@@ -101,6 +105,33 @@ public:
                        const std::vector<double> &batch_s,
                        bool is_first_batch, bool is_last_batch);
 
+    // Runs the ENTIRE field evolution (s=0..smax) on-device and feeds it
+    // straight into the same batch-processing pipeline ProcessBatch() uses
+    // -- replaces main.cpp's external Evolution+SBatchWindow construction
+    // for the GPU binary. phi never leaves device memory (no per-batch
+    // host->device copy), and the per-z stencil update runs as a GPU kernel
+    // instead of OpenMP over 32 CPU cores. Mirrors Evolution::Evolve()'s
+    // exact step/snapshot cadence and SBatchWindow's exact batching/halo
+    // logic (see gpu_integrator.cu) -- must match bit-for-bit in structure,
+    // only the arithmetic backend (CUDA kernels vs CPU loops) differs.
+    // Respects seed/resume exactly as ProcessBatch() does (same skip_until_/
+    // t_cut_prev_ state) -- only where the batch data comes from changes.
+    //
+    // on_batch_boundary(is_last_batch), if given, is called after EVERY
+    // batch boundary (skipped or processed, matching the old external
+    // SBatchWindow callback's unconditional per-batch firing) -- lets the
+    // caller do its own periodic bookkeeping (e.g. main.cpp's Format-B
+    // progress checkpoint) without RunEvolution needing to know about
+    // checkpoint_io.h itself.
+    //
+    // Prints "Timing phase=field_evolution" (the GPU stepping kernels only)
+    // and "Timing phase=gpu_integration" (time spent inside
+    // ProcessUploadedBatch calls) separately when done -- field_evolution
+    // uses the SAME phase name as the CPU binary's own evolution timing, so
+    // the two are directly comparable in a log.
+    void RunEvolution(const Setup &setup,
+                       std::function<void(bool is_last_batch)> on_batch_boundary = nullptr);
+
     // Cheap CPU-only readouts of the accumulated result for one cutoff index.
     // No kernel launch; callable in any order, any number of times, only
     // valid after the last ProcessBatch() call (is_last_batch == true) has
@@ -137,6 +168,21 @@ private:
     // using the persistent phi0_interp_ built once in the constructor.
     void build_phi2_batch(const std::vector<double> &batch_s,
                           std::vector<double> &phi2_host) const;
+
+    // Format-B skip bookkeeping, shared by ProcessBatch() (host-driven) and
+    // RunEvolution() (device-driven) so both respect skip_until_ identically
+    // -- see next_batch_index_/skip_until_'s doc comment below. Returns true
+    // if this batch's GPU work should be skipped; the caller must NOT skip
+    // field evolution itself either way (it always regenerates from s=0).
+    bool AdvanceAndCheckSkip(bool is_last_batch);
+
+    // Shared tail of ProcessBatch()/RunEvolution(): assumes d_phi_'s first
+    // n_z_*n_s_local doubles are ALREADY correctly populated (host-uploaded
+    // by ProcessBatch(), or device-repacked by RunEvolution()) -- builds/
+    // uploads phi2 and s, runs precompute_z_kernel + the per-cutoff-time
+    // gw_kernel loop, and folds the result into accum_/accum_plateau_.
+    void ProcessUploadedBatch(int n_s_local, const std::vector<double> &batch_s,
+                              bool is_first_batch, bool is_last_batch);
 
     // Shared finalize implementation for Finalize()/FinalizeAmplitude().
     // Adds seed_re_/seed_im_ (if has_seed_) before squaring/k-integration.
@@ -184,6 +230,23 @@ private:
     // consecutive memory for a fixed iz.
     double *d_phi_    = nullptr;   // [n_z_ * max_alloc_]
     double *d_phi2_   = nullptr;   // [n_z_ * max_alloc_]
+
+    // --- RunEvolution()'s on-device field state (unused by the host-driven
+    // ProcessBatch() path) ---
+    // Current evolution state, one value per z -- NOT batch-sized, since
+    // EvolvePi's stencil only ever reads spatial neighbors at the CURRENT
+    // step (never previous-s values); the s-history only matters later, to
+    // precompute_z_kernel's own s-derivatives.
+    double *d_phi_cur_ = nullptr;  // [n_z_]
+    double *d_pi_cur_  = nullptr;  // [n_z_]
+    // Rolling snapshot staging buffer for the CURRENT batch, FIXED stride
+    // max_alloc_ (unlike d_phi_'s stride, which is n_s_local -- only known
+    // once a batch closes) -- RunEvolution() writes one new column at a time
+    // as evolution proceeds, then repacks the batch's first n_s_local
+    // columns into d_phi_ (matching precompute_z_kernel's expected tight
+    // layout) once the batch is complete. Halo carry-forward is then just a
+    // same-buffer column copy (see carry_halo_kernel).
+    double *d_phi_evolve_ = nullptr;   // [n_z_ * max_alloc_]
     double *d_z_      = nullptr;   // [n_z_]
     double *d_w_      = nullptr;   // [n_w_]
     double *d_k_      = nullptr;   // [n_k_]

@@ -13,7 +13,6 @@
 #ifdef USE_GPU
 #  include "checkpoint_io.h"
 #  include "gpu_integrator.cuh"
-#  include "s_batch_window.h"
 #elif defined(USE_FILON)
 #  include "filon_integrator.h"
    using Integrator = FilonIntegrator;
@@ -228,37 +227,27 @@ int main(int argc, char *argv[]) {
     std::cout << "Timing phase=integrator_setup_total seconds="
               << elapsed(t_integrator_setup) << "\n";
 
-    // --- 2+3. Stream the 2D Milne evolution through bounded s-batches,
-    // running the GW integration (all cutoff times, for each batch) as each
-    // batch becomes available, instead of evolving the complete history
-    // first and integrating it afterwards. Periodically (time-based) writes
-    // a Format-B progress checkpoint, so an interruption here doesn't lose
-    // all GPU integration work done so far -- see checkpoint_io.h. ---
+    // --- 2+3. Run the 2D Milne field evolution entirely on-device (see
+    // GpuIntegrator::RunEvolution) and feed it straight into the GW
+    // integration (all cutoff times, for each batch) as each batch becomes
+    // available -- phi never leaves device memory, unlike the old
+    // Evolution(CPU)+SBatchWindow(host)->ProcessBatch(device) path. The
+    // per-batch-boundary callback preserves the old periodic (time-based)
+    // Format-B progress checkpoint, so an interruption here still doesn't
+    // lose all GPU integration work done so far -- see checkpoint_io.h. ---
     auto t_stream = Clock::now();
     auto t_last_checkpoint = Clock::now();
     const double checkpoint_interval_seconds = checkpoint_interval_minutes * 60.0;
-    {
-        SBatchWindow window(s_batch_size,
-            [&](const std::vector<std::vector<double>> &phi_batch,
-                const std::vector<double> &s_batch,
-                bool is_first_batch, bool is_last_batch) {
-                integrator.ProcessBatch(phi_batch, s_batch, is_first_batch, is_last_batch);
-                if (!is_last_batch &&
-                    elapsed(t_last_checkpoint) >= checkpoint_interval_seconds) {
-                    write_stream_checkpoint(checkpoint_path, integrator.MakeStreamCheckpoint(),
-                                            setup, k_done, n_t_total, times_local);
-                    t_last_checkpoint = Clock::now();
-                    std::cout << "Wrote stream checkpoint to " << checkpoint_path << "\n";
-                }
-            });
-        Evolution evo(setup,
-            [&](const std::vector<double> &phi, double s, bool is_last) {
-                window.Push(phi, s, is_last);
-            });
-        // Evolution's constructor is synchronous and has run to completion
-        // (streaming every batch through ProcessBatch) by the time this
-        // scope exits.
-    }
+    integrator.RunEvolution(setup,
+        [&](bool is_last_batch) {
+            if (!is_last_batch &&
+                elapsed(t_last_checkpoint) >= checkpoint_interval_seconds) {
+                write_stream_checkpoint(checkpoint_path, integrator.MakeStreamCheckpoint(),
+                                        setup, k_done, n_t_total, times_local);
+                t_last_checkpoint = Clock::now();
+                std::cout << "Wrote stream checkpoint to " << checkpoint_path << "\n";
+            }
+        });
     std::cout << "Timing phase=stream_all seconds=" << elapsed(t_stream) << "\n";
 
     // --- 4. Cheap finalize pass: square + k-integrate the accumulated

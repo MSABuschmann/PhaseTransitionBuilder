@@ -7,6 +7,25 @@
 #include <string>
 
 // ---------------------------------------------------------------------------
+// Device-ready potential parameters
+//
+// CUDA device code can't dispatch through a host-constructed Potential*
+// vtable, so a GPU evolution kernel needs dV() reduced to a plain tag plus a
+// small fixed-size coefficient array instead. Every concrete Potential
+// subclass fills this in via to_device_params(); the device-side dV switches
+// on `kind`. Plain data, no CUDA types -- safe to use from any binary (a
+// CPU-only build just never reads it).
+// ---------------------------------------------------------------------------
+
+enum class PotentialKind { kPhi4 = 0, kPhi4Piecewise = 1, kPolynomial = 2 };
+
+struct DevicePotentialParams {
+    PotentialKind kind;
+    double c[6];   // meaning depends on `kind` -- see each subclass's
+                   // to_device_params() for the exact layout.
+};
+
+// ---------------------------------------------------------------------------
 // Abstract base
 // ---------------------------------------------------------------------------
 
@@ -19,6 +38,7 @@ public:
     virtual std::map<std::string, double> params() const = 0;
     virtual double phi_true()  const = 0;
     virtual double phi_false() const = 0;
+    virtual DevicePotentialParams to_device_params() const = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -50,6 +70,9 @@ public:
     }
     double phi_true()  const override { return 1.0; }
     double phi_false() const override { return 0.0; }
+    DevicePotentialParams to_device_params() const override {
+        return {PotentialKind::kPhi4, {m2_, delta_, lam_, 0., 0., 0.}};
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -91,6 +114,10 @@ public:
     }
     double phi_true()  const override { return vbar_; }
     double phi_false() const override { return 0.0; }
+    DevicePotentialParams to_device_params() const override {
+        return {PotentialKind::kPhi4Piecewise,
+                {m2_, delta_, lam_, phi_esc_, eps_, vbar_}};
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -126,4 +153,7 @@ public:
     }
     double phi_true()  const override { return phi_true_; }
     double phi_false() const override { return 0.0; }
+    DevicePotentialParams to_device_params() const override {
+        return {PotentialKind::kPolynomial, {lambda_bar_, 0., 0., 0., 0., 0.}};
+    }
 };
