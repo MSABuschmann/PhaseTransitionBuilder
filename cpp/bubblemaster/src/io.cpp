@@ -3,7 +3,7 @@
 #include <iomanip>
 #include <sstream>
 
-void SaveStepResult(const std::string &output_dir, int i_t, double t,
+void SaveStepResult(const std::string &output_dir, int i_t, double t, double gamma_ij,
                     const std::vector<double> &wlist,
                     const std::vector<double> &spectrum) {
     std::ostringstream oss;
@@ -12,11 +12,12 @@ void SaveStepResult(const std::string &output_dir, int i_t, double t,
 
     H5::H5File file(oss.str(), H5F_ACC_TRUNC);
     write_attr_double(file, "t", t);
+    write_attr_double(file, "gamma_ij", gamma_ij);
     write_vector(file, "w",        wlist);
     write_vector(file, "spectrum", spectrum);
 }
 
-void SaveAmplitudeResult(const std::string &output_dir, int i_t, double t,
+void SaveAmplitudeResult(const std::string &output_dir, int i_t, double t, double gamma_ij,
                           const AmplitudeResult &res) {
     std::ostringstream oss;
     oss << output_dir << "result_"
@@ -24,6 +25,7 @@ void SaveAmplitudeResult(const std::string &output_dir, int i_t, double t,
 
     H5::H5File file(oss.str(), H5F_ACC_TRUNC);
     write_attr_double(file, "t", t);
+    write_attr_double(file, "gamma_ij", gamma_ij);
     write_vector(file, "w",        res.w);
     write_vector(file, "k",        res.klist);
     write_vector(file, "spectrum", res.spectrum);

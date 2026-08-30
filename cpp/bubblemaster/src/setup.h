@@ -30,6 +30,7 @@ public:
         t_m          = read_attr_double(file, "t_m");
         t_max        = read_attr_double(file, "t_max");
         smax         = read_attr_double(file, "smax");
+        gamma_ij     = read_attr_double(file, "gamma_ij");
 
         // --- potential ---
         potential = potential_from_hdf5(file.openGroup("potential"));
@@ -45,7 +46,7 @@ public:
     int n_z, n_w, n_k, n_t, how_often_ds, baby_steps, cutoff_type;
 
     // doubles
-    double d, ds, t_0, t_cut, t_m, t_max, smax;
+    double d, ds, t_0, t_cut, t_m, t_max, smax, gamma_ij;
 
     // potential (owned)
     std::unique_ptr<Potential> potential;

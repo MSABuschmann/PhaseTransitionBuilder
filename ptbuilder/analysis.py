@@ -159,44 +159,61 @@ def load_scan(scan_root: Path) -> SimpleNamespace:
     These scans are small (tens of rows x tens of times x ~32 frequencies),
     so eager loading upfront is cheap and simpler than per-row lazy caching.
 
-    Raises FileNotFoundError if any row's results are incomplete (fewer
-    result_*.h5 files than its setup.h5 requests) -- naming the row.
+    Reads ONLY each row's own result_*.h5 files under scan_root/gpu/ -- never
+    manifest.tsv (a write-only convenience index for the SLURM script, not a
+    source of truth here) or setup.h5. Every result_*.h5 carries its own "t"
+    and "gamma_ij" attributes and "w"/"spectrum" datasets, so a row is fully
+    reconstructed from whatever result files actually exist for it on disk;
+    a row directory with no result files yet is simply skipped, and a row's
+    time axis is exactly however many result files it actually has, in
+    contrast to trusting a possibly-stale expected count from elsewhere.
     """
     scan_root = Path(scan_root)
-    root = scan_root.parent.parent
-
-    manifest_rows = []
-    with open(scan_root / "manifest.tsv") as f:
-        next(f)  # header
-        for line in f:
-            index, gamma, n_t, setup, name = line.rstrip("\n").split("\t")
-            manifest_rows.append((int(index), float(gamma), int(n_t), setup, name))
+    output_root = scan_root / "gpu"
 
     rows = []
-    for index, gamma, n_t, setup_rel, name in manifest_rows:
-        with h5py.File(root / setup_rel, "r") as f:
-            times = f["times"][:]
-            wlist = f["wlist"][:]
-        if len(times) != n_t:
-            raise RuntimeError(
-                f"{name}: setup.h5 has {len(times)} times, manifest says {n_t}")
+    for row_dir in sorted(output_root.iterdir()):
+        if not row_dir.is_dir():
+            continue
+        result_paths = sorted(row_dir.glob("result_*.h5"))
+        if not result_paths:
+            continue
 
-        out_dir = scan_root / "gpu" / name
-        spectrum = np.zeros((n_t, len(wlist)))
-        for it in range(n_t):
-            path = out_dir / f"result_{it:04d}.h5"
-            if not path.exists():
-                raise FileNotFoundError(
-                    f"{name}: missing {path.relative_to(root)} -- this row hasn't "
-                    f"finished running yet")
+        ts, gammas, ws, specs = [], [], [], []
+        for path in result_paths:
             with h5py.File(path, "r") as f:
-                spectrum[it] = f["spectrum"][:]
+                ts.append(float(f.attrs["t"]))
+                gammas.append(float(f.attrs["gamma_ij"]))
+                ws.append(f["w"][:])
+                specs.append(f["spectrum"][:])
 
-        rows.append(SimpleNamespace(gamma_ij=gamma, times=times, wlist=wlist,
-                                    spectrum=spectrum))
+        gamma_ij = gammas[0]
+        if any(abs(g - gamma_ij) > 1e-9 * max(1.0, abs(gamma_ij)) for g in gammas):
+            raise RuntimeError(
+                f"{row_dir.name}: gamma_ij differs across its own result files "
+                f"({sorted(set(gammas))})")
+        wlist = ws[0]
+        if any(w.shape != wlist.shape or np.any(np.abs(w - wlist) > 1e-9) for w in ws):
+            raise RuntimeError(
+                f"{row_dir.name}: w (frequency grid) differs across its own result files")
+
+        order = np.argsort(ts)
+        rows.append(SimpleNamespace(
+            gamma_ij=gamma_ij, times=np.asarray(ts)[order], wlist=wlist,
+            spectrum=np.asarray(specs)[order]))
+
+    if not rows:
+        raise FileNotFoundError(f"No rows with any result_*.h5 files found under {output_root}")
 
     rows.sort(key=lambda r: r.gamma_ij)
-    return SimpleNamespace(root=root, scan_root=scan_root, rows=rows)
+    gamma_min = rows[0].gamma_ij
+    gamma_max = rows[-1].gamma_ij
+    t_max = max(r.times[-1] for r in rows)
+    print(f"Loaded scan {scan_root.name}: {len(rows)} rows, "
+          f"gamma_ij in [{gamma_min:.3f}, {gamma_max:.3f}], T_MAX={t_max:.3f}")
+
+    return SimpleNamespace(root=scan_root.parent.parent, scan_root=scan_root, rows=rows,
+                           gamma_min=gamma_min, gamma_max=gamma_max, t_max=t_max)
 
 
 def _interp_row_at_t(row: SimpleNamespace, t: float) -> np.ndarray:
@@ -210,36 +227,57 @@ def _interp_row_at_t(row: SimpleNamespace, t: float) -> np.ndarray:
     return np.exp(f(t))
 
 
-def query_spectrum(scan_data: SimpleNamespace, gamma_ij: float, t: float) -> tuple:
+def query_spectrum(scan_data: SimpleNamespace, gamma_ij: float, t: float,
+                   no_throw: bool = False) -> tuple:
     """
     Query a non-rectangular runtime scan's GW spectrum at an arbitrary
     (gamma_ij, t) via interpolation:
       - log-linear across the two bracketing gamma_ij rows in scan_data.rows
-        (clipped to the scan's own gamma_ij range at the edges; if gamma_ij
-        exactly matches a row, that row's own wlist/spectrum, no
-        interpolation needed)
+        (if gamma_ij exactly matches a row, that row's own wlist/spectrum,
+        no interpolation needed)
       - log-linear across each bracketing row's own times[] (see
-        _interp_row_at_t)
+        _interp_row_at_t) -- t below a row's own collision time floors to
+        that row's own floor value (a real, physical pre-collision zero,
+        not missing data)
 
     scan_data is whatever load_scan() returned -- pure in-memory, no disk
     I/O here, so cheap to call repeatedly (e.g. for several gamma_ij targets
     against the same scan).
 
-    Returns (k, spectrum): k is the lower-gamma_ij bracketing row's own
-    wlist, TRUNCATED to omega_max_hi = min(row_lo.wlist[-1], row_hi.wlist[-1])
-    -- omega_max shrinks with gamma_ij, so the higher row's own coverage is
-    usually the narrower one. Never extrapolated past what BOTH bracketing
-    rows actually computed: combining a real value from one row with a
-    zero-padded "row simply doesn't reach here" value from the other, in
-    log-space, would otherwise crash the result toward the floor right at
-    that edge -- not a physical feature, just missing data pretending to be
-    zero (caught by comparing a real extended-vs-direct scan: the last
-    couple of points were orders of magnitude below their neighbors).
+    (gamma_ij, t) outside what the scan actually covers -- gamma_ij outside
+    [scan_data.gamma_min, scan_data.gamma_max], or t > scan_data.t_max -- is
+    missing data, not a physical zero, so by default this raises ValueError.
+    Pass no_throw=True (for a reconstruction pass that needs to keep going
+    and separately tally how much weight fell outside the scan's coverage)
+    to get an all-zero spectrum back instead.
+
+    Returns (k, spectrum, out_of_range). out_of_range is always False unless
+    no_throw=True let the query through. k is the lower-gamma_ij bracketing
+    row's own wlist, TRUNCATED to omega_max_hi = min(row_lo.wlist[-1],
+    row_hi.wlist[-1]) -- omega_max shrinks with gamma_ij, so the higher
+    row's own coverage is usually the narrower one. Never extrapolated past
+    what BOTH bracketing rows actually computed: combining a real value from
+    one row with a zero-padded "row simply doesn't reach here" value from
+    the other, in log-space, would otherwise crash the result toward the
+    floor right at that edge -- not a physical feature, just missing data
+    pretending to be zero (caught by comparing a real extended-vs-direct
+    scan: the last couple of points were orders of magnitude below their
+    neighbors).
     """
     rows = scan_data.rows
-    gammas = np.array([r.gamma_ij for r in rows])
 
-    g = float(np.clip(gamma_ij, gammas.min(), gammas.max()))
+    if gamma_ij < scan_data.gamma_min or gamma_ij > scan_data.gamma_max or t > scan_data.t_max:
+        if not no_throw:
+            raise ValueError(
+                f"Requested (gamma_ij={gamma_ij:g}, t={t:g}) is outside this scan's "
+                f"covered range (gamma_ij in [{scan_data.gamma_min:g}, "
+                f"{scan_data.gamma_max:g}], t <= {scan_data.t_max:g}) -- pass "
+                f"no_throw=True to get a zero spectrum instead")
+        ref_row = rows[0] if gamma_ij <= scan_data.gamma_min else rows[-1]
+        return ref_row.wlist, np.zeros_like(ref_row.wlist), True
+
+    gammas = np.array([r.gamma_ij for r in rows])
+    g = float(gamma_ij)
     ig_hi = int(np.searchsorted(gammas, g))
     ig_hi = min(max(ig_hi, 1), len(rows) - 1)
     ig_lo = ig_hi - 1
@@ -250,7 +288,7 @@ def query_spectrum(scan_data: SimpleNamespace, gamma_ij: float, t: float) -> tup
     spec_lo_full = _interp_row_at_t(row_lo, t)
 
     if ig_lo == ig_hi:
-        return row_lo.wlist, spec_lo_full
+        return row_lo.wlist, spec_lo_full, False
 
     row_hi = rows[ig_hi]
     spec_hi_full = _interp_row_at_t(row_hi, t)
@@ -267,7 +305,7 @@ def query_spectrum(scan_data: SimpleNamespace, gamma_ij: float, t: float) -> tup
     log_lo = np.log(np.maximum(spec_lo, floor))
     log_hi = np.log(np.maximum(spec_hi, floor))
     spectrum = np.exp(log_lo + frac * (log_hi - log_lo))
-    return k, spectrum
+    return k, spectrum, False
 
 
 # ---------------------------------------------------------------------------

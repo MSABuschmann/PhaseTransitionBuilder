@@ -248,6 +248,7 @@ def write_2d_setup(model, gamma: float, times: np.ndarray,
             float(p.wall_points) if p.wall_points is not None else np.nan
         )
         f.attrs["collision_wall_width"] = collision_wall_width(profile, gamma)
+        f.attrs["gamma_ij"] = float(gamma)
 
         # Potential group (read by C++ Potential::from_hdf5)
         pot_grp = f.require_group("potential")
@@ -390,21 +391,24 @@ def generate_surrogate(model, root: Path, tag_label: str,
         t = time_at_gamma(gamma)
         return 2.0 * float(kin.R(t, r="mid"))
 
-    # --- If extending: read the old scan's actual manifest rows (never
-    # recomputed -- a fresh np.linspace over a larger gamma_ij_max would
-    # silently shift EVERY row's gamma_ij, not just add new ones) and its
-    # locked scan-definition attrs, overriding the arguments above with them.
+    # --- If extending: read the old scan's actual rows straight from its
+    # setups/*.h5 files (never from manifest.tsv, which is a write-only
+    # convenience index for the SLURM script and can drift out of sync with
+    # what's actually on disk -- see write_2d_setup's "gamma_ij" attr) and
+    # its locked scan-definition attrs, overriding the arguments above with
+    # them. gamma_ij is never recomputed from a fresh np.linspace over a
+    # larger gamma_ij_max, which would silently shift EVERY row's gamma_ij,
+    # not just add new ones.
     old_rows = None
     old_gamma_star_max = None
     if extend_from is not None:
         extend_from = Path(extend_from)
         old_rows = []
-        with open(extend_from / "manifest.tsv") as f:
-            next(f)  # header
-            for line in f:
-                index, gamma, n_t, setup, name = line.rstrip("\n").split("\t")
-                old_rows.append(SimpleNamespace(index=int(index), gamma_ij=float(gamma),
-                                                n_t=int(n_t), name=name))
+        for setup_path in (extend_from / "setups").glob("*.h5"):
+            with h5py.File(setup_path, "r") as f:
+                old_rows.append(SimpleNamespace(name=setup_path.stem,
+                                                gamma_ij=float(f.attrs["gamma_ij"])))
+        old_rows.sort(key=lambda r: r.gamma_ij)
 
         with h5py.File(extend_from / "setups" / f"{old_rows[-1].name}.h5", "r") as f:
             old_gamma_star_max     = float(f.attrs["gamma_star_max"])
@@ -477,7 +481,12 @@ def generate_surrogate(model, root: Path, tag_label: str,
 
     manifest_rows = []
     for index, gamma_ij in enumerate(gamma_ij_grid):
-        name = f"g{gamma_ij:08.3f}".replace(".", "p")
+        # Plain sequential row names, not gamma_ij encoded into the name:
+        # gamma_ij now lives in the row's own files (write_2d_setup's
+        # "gamma_ij" attr, and every result_*.h5's own attr), so the name is
+        # just an opaque on-disk id -- no precision-collision risk on a fine
+        # grid, and gaps in the sequence make missing rows obvious at a glance.
+        name = old_rows[index].name if index < n_old else f"row_{index:04d}"
         setup_path = setup_dir / f"{name}.h5"
 
         if index < n_old:

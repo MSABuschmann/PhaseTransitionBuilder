@@ -275,10 +275,10 @@ int main(int argc, char *argv[]) {
         auto t_it = Clock::now();
         if (save_amplitude) {
             AmplitudeResult res = integrator.FinalizeAmplitude(local_i_t);
-            SaveAmplitudeResult(output_dir, global_i_t, t, res);
+            SaveAmplitudeResult(output_dir, global_i_t, t, setup.gamma_ij, res);
         } else {
             std::vector<double> spectrum = integrator.Finalize(local_i_t);
-            SaveStepResult(output_dir, global_i_t, t, wlist, spectrum);
+            SaveStepResult(output_dir, global_i_t, t, setup.gamma_ij, wlist, spectrum);
         }
         std::cout << "Timing phase=finalize index=" << global_i_t
                   << " seconds=" << elapsed(t_it) << "\n";
@@ -337,13 +337,13 @@ int main(int argc, char *argv[]) {
             AmplitudeResult res = integrator.ComputeAmplitude(i_t);
             compute_seconds = elapsed(t_compute);
             auto t_output = Clock::now();
-            SaveAmplitudeResult(output_dir, i_t, setup.times[i_t], res);
+            SaveAmplitudeResult(output_dir, i_t, setup.times[i_t], setup.gamma_ij, res);
             output_seconds = elapsed(t_output);
         } else {
             std::vector<double> spectrum = integrator.Compute(i_t);
             compute_seconds = elapsed(t_compute);
             auto t_output = Clock::now();
-            SaveStepResult(output_dir, i_t, setup.times[i_t], wlist, spectrum);
+            SaveStepResult(output_dir, i_t, setup.times[i_t], setup.gamma_ij, wlist, spectrum);
             output_seconds = elapsed(t_output);
         }
         compute_total += compute_seconds;
