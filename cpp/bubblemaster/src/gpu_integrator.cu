@@ -839,9 +839,18 @@ void GpuIntegrator::build_phi2_batch(const std::vector<double> &batch_s,
 {
     const std::size_t n_batch = batch_s.size();
     phi2_host.resize(n_batch * n_z_);
+    // phi0_interp_ is a pure read-only binary search (Interpolator::operator()
+    // is const, no mutable state) -- safe to call concurrently. collapse(2)
+    // spreads the full n_batch*n_z_ iteration space across all threads,
+    // rather than just n_batch (~max_alloc_, too few to load-balance well on
+    // its own) -- this loop was previously single-threaded and, for the
+    // expensive high-gamma_ij rows, was found to cost as much as
+    // precompute_z_kernel itself (see "Timing phase=batch"'s
+    // phi2_build_seconds field).
+#pragma omp parallel for collapse(2)
     for (std::size_t is = 0; is < n_batch; ++is) {
-        double s_val = batch_s[is];
         for (std::size_t iz = 0; iz < n_z_; ++iz) {
+            double s_val = batch_s[is];
             double z_val = iz * dz_;
             double r1 = std::sqrt(s_val*s_val + (z_val - d_/2.)*(z_val - d_/2.));
             double r2 = std::sqrt(s_val*s_val + (z_val + d_/2.)*(z_val + d_/2.));
