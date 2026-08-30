@@ -935,12 +935,22 @@ void GpuIntegrator::ProcessUploadedBatch(int n_s_local, const std::vector<double
     const auto t_batch = std::chrono::steady_clock::now();
 
     // --- Build phi2 for this batch on the host ---
+    // Diagnostic timer: build_phi2_batch is a single-threaded host loop (no
+    // OpenMP, no GPU) doing ~n_z_*n_s_local scalar interpolator evaluations
+    // -- suspected as the largest untimed contributor to gpu_integration's
+    // total (see "Timing phase=batch"'s phi2_build_seconds field below).
+    const auto t_phi2 = std::chrono::steady_clock::now();
     std::vector<double> phi2_host;
     build_phi2_batch(batch_s, phi2_host);
+    const double phi2_build_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t_phi2).count();
 
     // --- Upload this batch's phi2/s (phi is already in d_phi_) ---
+    const auto t_upload = std::chrono::steady_clock::now();
     CUDA_CHECK(cudaMemcpy(d_phi2_, phi2_host.data(), phi2_host.size() * sizeof(double), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_s_,    batch_s.data(),   batch_s.size()   * sizeof(double), cudaMemcpyHostToDevice));
+    const double upload_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t_upload).count();
 
     const std::size_t total = n_w_ * n_k_ * static_cast<std::size_t>(n_s_local);
     constexpr int BLOCK = 256;
@@ -1045,6 +1055,8 @@ void GpuIntegrator::ProcessUploadedBatch(int n_s_local, const std::vector<double
 
     std::cout << "Timing phase=batch size=" << n_s_local
               << " is_first=" << is_first_batch << " is_last=" << is_last_batch
+              << " phi2_build_seconds=" << phi2_build_seconds
+              << " upload_seconds=" << upload_seconds
               << " precompute_seconds=" << precompute_seconds
               << " kernel_seconds=" << kernel_seconds
               << " transfer_seconds=" << transfer_seconds
