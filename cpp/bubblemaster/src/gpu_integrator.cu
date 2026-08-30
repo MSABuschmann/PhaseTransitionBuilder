@@ -947,12 +947,23 @@ void GpuIntegrator::ProcessUploadedBatch(int n_s_local, const std::vector<double
     const int grid = (static_cast<int>(total) + BLOCK - 1) / BLOCK;
 
     // --- z-integrals for this batch only ---
+    // Own explicit sync (unlike most kernels in this file) so its host-side
+    // timing is accurate -- diagnostic only, to measure precompute_z_kernel's
+    // share of a batch's cost independent of gw_kernel's (see
+    // "Timing phase=batch"'s precompute_seconds field below), since it's the
+    // one part of a batch's GPU work that does NOT shrink when a seeded/
+    // extend run only requests a few new cutoff times (it runs once per
+    // batch regardless of n_t_, unlike gw_kernel).
+    const auto t_precompute = std::chrono::steady_clock::now();
     CUDA_CHECK(cudaMemset(d_zbuf_, 0, total * 6 * sizeof(double)));
     precompute_z_kernel<<<grid, BLOCK>>>(
         d_phi_, d_phi2_, n_s_local, static_cast<int>(n_z_),
         static_cast<int>(n_w_), static_cast<int>(n_k_), i_s_start,
         ds_, dz_, d_z_, d_w_, d_k_, d_zbuf_);
     CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    const double precompute_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t_precompute).count();
 
     // --- Reset this batch's incremental plateau state ---
     // (each s belongs to exactly one batch -- cum state must NOT persist
@@ -1034,6 +1045,7 @@ void GpuIntegrator::ProcessUploadedBatch(int n_s_local, const std::vector<double
 
     std::cout << "Timing phase=batch size=" << n_s_local
               << " is_first=" << is_first_batch << " is_last=" << is_last_batch
+              << " precompute_seconds=" << precompute_seconds
               << " kernel_seconds=" << kernel_seconds
               << " transfer_seconds=" << transfer_seconds
               << " reduction_seconds=" << reduce_seconds
