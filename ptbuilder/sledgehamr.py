@@ -90,3 +90,30 @@ def get_spectrum_at_time(output, t_target: float, L: float,
     times = np.array(output.GetTimesOfGravitationalWaveSpectra())
     idx   = int(np.argmin(np.abs(times - t_target)))
     return get_gw_spectrum(output, idx, L, zero_pad)
+
+
+def get_spectrum_interpolated_at_time(output, t_target: float, L: float,
+                                      zero_pad: float = 1.) -> tuple:
+    """
+    Log-space linear interpolation of the two snapshots bracketing
+    t_target (clamped to the first/last snapshot outside that range) --
+    more accurate than get_spectrum_at_time's nearest-snapshot lookup when
+    snapshots are sparse relative to how fast the spectrum evolves.
+
+    Returns (k, dE_dlnk, t_actual) -- t_actual is t_target when it falls
+    inside the snapshot range, else whichever endpoint was clamped to.
+    """
+    times = np.array(output.GetTimesOfGravitationalWaveSpectra())
+    if t_target <= times[0]:
+        return get_gw_spectrum(output, 0, L, zero_pad)
+    if t_target >= times[-1]:
+        return get_gw_spectrum(output, len(times) - 1, L, zero_pad)
+
+    i = int(np.searchsorted(times, t_target)) - 1
+    k, s_a, t_a = get_gw_spectrum(output, i, L, zero_pad)
+    _, s_b, t_b = get_gw_spectrum(output, i + 1, L, zero_pad)
+    alpha = (t_target - t_a) / (t_b - t_a)
+    floor = max(s_a.max(), s_b.max()) * 1e-12
+    log_a = np.log(np.maximum(s_a, floor))
+    log_b = np.log(np.maximum(s_b, floor))
+    return k, np.exp(log_a + alpha * (log_b - log_a)), t_target

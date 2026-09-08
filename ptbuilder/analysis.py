@@ -90,6 +90,20 @@ def bubblemaster_normalization(lambda_bar: float) -> float:
     return kconv, norm
 
 
+def rho_vac_bar(lambda_bar: float) -> float:
+    """False-minus-true vacuum energy in BubbleMaster dimensionless units."""
+    upsilon = 3.0 + np.sqrt(9.0 - 8.0 * lambda_bar)
+    return -(0.5 - upsilon / (4.0 * lambda_bar) + upsilon**2 / (32.0 * lambda_bar))
+
+
+def to_chw(dE_dlnk: np.ndarray, rstar: float, lambda_bar: float,
+          volume: float) -> np.ndarray:
+    """dE/dlnk -> the CHW dimensionless quantity
+    [H_*R_*Omega_vac]^-2 dOmega_gw/dlnk (Cutting, Hindmarsh & Weir)."""
+    rho_vac = rho_vac_bar(lambda_bar)
+    return (3.0 / (8.0 * np.pi * rho_vac**2 * rstar**2 * volume)) * dE_dlnk
+
+
 # ---------------------------------------------------------------------------
 # 2D scan interpolator
 # ---------------------------------------------------------------------------
@@ -216,6 +230,47 @@ def load_scan(scan_root: Path) -> SimpleNamespace:
                            gamma_min=gamma_min, gamma_max=gamma_max, t_max=t_max)
 
 
+def load_scan_manifest(scan_dir: Path) -> SimpleNamespace:
+    """
+    Load an older, manifest.tsv-indexed runtime scan into the same shape
+    load_scan() returns (SimpleNamespace with .rows/.gamma_min/.gamma_max/
+    .t_max), so query_spectrum() and reconstruct_pair_spectrum() work on
+    either. Unlike load_scan()'s result_*.h5 files (which carry their own
+    t/gamma_ij attributes), this format's result_*.h5 files carry neither --
+    times and the frequency grid come from each row's own setup.h5 instead,
+    indexed via manifest.tsv.
+    """
+    scan_dir  = Path(scan_dir)
+    repo_root = scan_dir.parent.parent   # scan_dir = repo_root/'data'/<scan name>
+    manifest_lines = (scan_dir / "manifest.tsv").read_text().strip().split("\n")[1:]
+    rows = []
+    for line in manifest_lines:
+        index, gamma, n_t, setup_rel, name = line.split("\t")
+        setup_path = repo_root / setup_rel
+        outdir = scan_dir / "gpu" / name
+        files = sorted(outdir.glob("result_*.h5"), key=lambda p: int(p.stem.split("_")[1]))
+        if not files:
+            continue
+        with h5py.File(setup_path) as f:
+            times_row = f["times"][:]
+            w_row     = f["wlist"][:]
+        spectrum_row = np.zeros((len(files), len(w_row)))
+        for it, fp in enumerate(files):
+            with h5py.File(fp) as f:
+                spectrum_row[it] = f["spectrum"][:]
+        rows.append(SimpleNamespace(gamma_ij=float(gamma), times=times_row[:len(files)],
+                                    wlist=w_row, spectrum=spectrum_row))
+    if not rows:
+        raise FileNotFoundError(f"No rows with any result_*.h5 files found under {scan_dir}")
+    rows.sort(key=lambda r: r.gamma_ij)
+    gamma_min, gamma_max = rows[0].gamma_ij, rows[-1].gamma_ij
+    t_max = max(r.times[-1] for r in rows)
+    print(f"Loaded scan {scan_dir.name}: {len(rows)} rows, "
+         f"gamma_ij in [{gamma_min:.3f}, {gamma_max:.3f}], T_MAX={t_max:.3f}")
+    return SimpleNamespace(root=scan_dir.parent, scan_root=scan_dir, rows=rows,
+                           gamma_min=gamma_min, gamma_max=gamma_max, t_max=t_max)
+
+
 def _interp_row_at_t(row: SimpleNamespace, t: float) -> np.ndarray:
     """Log-linear interpolation over one row's own times[] -- floored (in
     log-space) below its own t_first (no collision yet in this row), clipped
@@ -308,6 +363,48 @@ def query_spectrum(scan_data: SimpleNamespace, gamma_ij: float, t: float,
     return k, spectrum, False
 
 
+def reconstruct_pair_spectrum(gamma_ij: float, weights_t: np.ndarray,
+                              weights_times: np.ndarray, t_max: float,
+                              scan_data: SimpleNamespace,
+                              k_out: np.ndarray) -> np.ndarray:
+    """
+    Reconstruct one colliding pair's dE/dlnk(k_out), integrating its
+    collision weight against query_spectrum()'s cumulative spectrum over
+    only this pair's own contiguous nonzero-weight window (exact, not an
+    approximation -- trims to where weights_t > 0, plus one trailing point
+    for the diff). k_out is a shared grid every pair in a case is regridded
+    onto via np.interp (individual scan rows may cover a narrower k range).
+
+    scan_data: whatever load_scan()/load_scan_manifest() returned.
+    """
+    g = float(np.clip(gamma_ij, scan_data.gamma_min, scan_data.gamma_max))
+    t_min = min(r.times[0] for r in scan_data.rows)
+    t_hi  = min(t_max, scan_data.t_max)
+
+    nz = np.where(weights_t > 0)[0]
+    if len(nz) == 0:
+        return np.zeros_like(k_out)
+    lo, hi = nz[0], min(nz[-1] + 2, len(weights_times))
+    t_window = weights_times[lo:hi]
+    w_window = weights_t[lo:hi]
+    mask = (t_window >= t_min) & (t_window <= t_hi)
+    t_comp = t_window[mask]
+    w_comp = w_window[mask]
+    if len(t_comp) == 0 or t_comp[-1] < t_hi:
+        t_comp = np.append(t_comp, t_hi)
+        w_comp = np.append(w_comp, np.interp(t_hi, weights_times, weights_t))
+    if len(t_comp) < 2:
+        return np.zeros_like(k_out)
+
+    specs = np.empty((len(t_comp), len(k_out)))
+    for i, t in enumerate(t_comp):
+        k, s, _ = query_spectrum(scan_data, g, float(t), no_throw=True)
+        specs[i] = np.interp(k_out, k, s, left=0., right=0.)
+
+    delta = np.diff(specs, axis=0)
+    return (w_comp[:-1, None] * delta).sum(axis=0)
+
+
 # ---------------------------------------------------------------------------
 # Weights I/O
 # ---------------------------------------------------------------------------
@@ -326,12 +423,13 @@ def load_weights(path: Path, n_t: int) -> tuple:
     with h5py.File(path, "r") as f:
         if "collision_radius" not in f.attrs:
             raise ValueError(
-                f"{path} has no collision_radius metadata; regenerate its "
-                "weights with the midpoint convention"
+                f"{path} has no collision_radius metadata; regenerate or "
+                "relabel it explicitly before use"
             )
-        if str(f.attrs["collision_radius"]) != "mid":
+        if str(f.attrs["collision_radius"]) not in ("mid", "out"):
             raise ValueError(
-                f"{path} does not use the required midpoint convention"
+                f"{path} has unrecognized collision_radius="
+                f"{f.attrs['collision_radius']!r}; must be 'mid' or 'out'"
             )
         flat   = f["weights"][:]
         pair_i = f["pair_i"][:].astype(int)
