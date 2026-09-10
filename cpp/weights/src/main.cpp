@@ -33,9 +33,10 @@ static WeightsSetup read_setup(const std::string &path) {
             "relabel it explicitly before use");
     s.collision_r0 = read_attr_double(file, "collision_r0");
     s.collision_radius = read_attr_string(file, "collision_radius");
-    if (s.collision_radius != "mid")
+    if (s.collision_radius != "mid" && s.collision_radius != "out")
         throw std::runtime_error(
-            "Operational weights inputs must use collision_radius='mid'");
+            "collision_radius must be 'mid' or 'out', got '" +
+            s.collision_radius + "'");
     s.n_t    = read_attr_int   (file, "n_t");
     s.n_b    = read_attr_int   (file, "n_b");
     s.t      = read_vector(file, "t");

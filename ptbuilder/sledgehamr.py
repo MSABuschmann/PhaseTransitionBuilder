@@ -46,11 +46,16 @@ def get_gw_spectrum(output, snapshot: int, L: float,
     """
     Read and normalize the GW spectrum from one snapshot index.
 
+    Applies apply_keffsq's lattice momentum correction to the raw k_sq
+    before normalizing -- the naive integer shell index isn't the true mean
+    |k| for a cubic lattice.
+
     Returns (k, dE_dlnk, t).
     """
-    from .analysis import sledgehamr_normalization
+    from .analysis import apply_keffsq, sledgehamr_normalization
     data = output.GetGravitationalWaveSpectrum(snapshot)
-    k, s = sledgehamr_normalization(data["k_sq"], data["spectrum"], L, zero_pad)
+    k_sq = apply_keffsq(data["k_sq"])
+    k, s = sledgehamr_normalization(k_sq, data["spectrum"], L, zero_pad)
     return k, s, float(data["t"])
 
 
