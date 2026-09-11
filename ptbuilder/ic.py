@@ -135,13 +135,17 @@ def _two_bubble_ic(profile, gamma: float, dz: float,
     z_comb   = -z_comb[::-1] + d / 2.0
 
     # Add trailing zeros (vacuum region beyond the outer bubble wall).
-    # Sized to stay causally ahead of the LARGER of this row's own natural
-    # cutoff estimate and t_horizon (how far it will actually be run) --
-    # using t_max_approx alone here would undersize the domain for any row
-    # forced to run past its own natural timescale, letting its wall/signal
-    # reflect off the domain edge before the run finishes.
+    # t_horizon, when known, IS this row's actual run extent -- it will
+    # never be integrated past it, so that's what the domain needs to stay
+    # causally ahead of, not the row's own natural-cutoff heuristic. Using
+    # max(t_max_approx, t_horizon) here would be safe but wasteful: it'd
+    # keep oversizing high-gamma rows whose own heuristic happens to exceed
+    # a smaller shared t_horizon, paying for padding that's never reached.
+    # Only fall back to the heuristic when no horizon is given at all (e.g.
+    # callers outside write_2d_setup that don't know it).
     t_max_approx = 12.0 / 9.0 * d + 7.0 * (3.0 / 40.0 * d) + 0.5 * r_out
-    t_max_approx = max(t_max_approx, t_horizon)
+    if t_horizon > 0.:
+        t_max_approx = t_horizon
     extra_length = (d / 2.0 + t_max_approx + r_out) * 1.1 - z_comb[-1]
     extra_n      = int(round(extra_length / dz))
     if extra_n > 0:
