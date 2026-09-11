@@ -54,7 +54,7 @@ def _mass_scale(potential) -> float:
 
 
 def _two_bubble_ic(profile, gamma: float, dz: float,
-                   collision_radius: str = "mid"):
+                   collision_radius: str = "mid", t_horizon: float = 0.):
     """
     Build the initial field profile and z grid for two colliding bubbles.
 
@@ -66,6 +66,14 @@ def _two_bubble_ic(profile, gamma: float, dz: float,
 
     The separation d is chosen so that the wall Lorentz factor (wall-thinning
     ratio) equals gamma exactly when the selected wall surfaces first touch.
+
+    ``t_horizon`` is the furthest time this row will actually be integrated
+    to (e.g. a shared T_MAX forced across every row of a multi-gamma scan,
+    which can be far later than this row's own natural cutoff for
+    small-gamma/small-d rows). The trailing vacuum padding is sized to stay
+    causally ahead of whichever of the row's own estimate or t_horizon is
+    larger, so a row forced to run long doesn't have its wall/signal
+    reflect off the domain edge partway through.
     """
     r_out = profile.rout_0
     r_in  = profile.rin_0
@@ -126,8 +134,14 @@ def _two_bubble_ic(profile, gamma: float, dz: float,
     phi_comb = phi_comb[::-1]
     z_comb   = -z_comb[::-1] + d / 2.0
 
-    # Add trailing zeros (vacuum region beyond the outer bubble wall)
+    # Add trailing zeros (vacuum region beyond the outer bubble wall).
+    # Sized to stay causally ahead of the LARGER of this row's own natural
+    # cutoff estimate and t_horizon (how far it will actually be run) --
+    # using t_max_approx alone here would undersize the domain for any row
+    # forced to run past its own natural timescale, letting its wall/signal
+    # reflect off the domain edge before the run finishes.
     t_max_approx = 12.0 / 9.0 * d + 7.0 * (3.0 / 40.0 * d) + 0.5 * r_out
+    t_max_approx = max(t_max_approx, t_horizon)
     extra_length = (d / 2.0 + t_max_approx + r_out) * 1.1 - z_comb[-1]
     extra_n      = int(round(extra_length / dz))
     if extra_n > 0:
@@ -195,11 +209,11 @@ def write_2d_setup(model, gamma: float, times: np.ndarray,
     p       = params
 
     dz_target = _spatial_step(profile, gamma, p)
+    t_min_global = float(times[-1]) if len(times) > 0 else 0.
     z, phi0, d, ds = _two_bubble_ic(
-        profile, gamma, dz_target, p.collision_radius
+        profile, gamma, dz_target, p.collision_radius, t_horizon=t_min_global
     )
 
-    t_min_global       = float(times[-1]) if len(times) > 0 else 0.
     t_0, t_cut, t_m, t_max = _cutoff_times(d, p.cutoff_type, p.t_0_scal,
                                             t_min_global)
     smax = 1.2 * d
