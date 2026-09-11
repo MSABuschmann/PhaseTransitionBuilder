@@ -1,6 +1,7 @@
 """
 Bootstrap GW spectrum: combine 2D scan results with collision weights.
 """
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, Optional
@@ -446,9 +447,34 @@ def reconstruct_pair_spectrum(gamma_ij: float, weights_t: np.ndarray,
     interp_fn, gammas: from build_runtime_scan_interpolator(scan_data, k_out)
         -- build once per (scan, k_out), reuse across every pair.
     times_bounds: [earliest row start time, scan_data.t_max].
+
+    If t_max exceeds the scan's own coverage (times_bounds[-1]), the query
+    is silently clamped there -- warns with the fraction of this pair's own
+    collision weight (by integrated area, not sample count) that falls past
+    the clamp and is therefore dropped, so an insufficient scan surfaces
+    itself instead of requiring a separate manual check.
     """
     g = float(np.clip(gamma_ij, gammas.min(), gammas.max()))
     t_hi = min(t_max, times_bounds[-1])
+
+    if t_max > times_bounds[-1]:
+        full_mask = (weights_times >= times_bounds[0]) & (weights_times <= t_max)
+        if full_mask.sum() >= 2:
+            wt_full, tt_full = weights_t[full_mask], weights_times[full_mask]
+            total_weight = np.trapz(wt_full, tt_full)
+            if total_weight > 0:
+                used = tt_full <= t_hi
+                used_weight = np.trapz(wt_full[used], tt_full[used]) if used.sum() >= 2 else 0.
+                discarded_frac = 1. - used_weight / total_weight
+                if discarded_frac > 1e-3:
+                    warnings.warn(
+                        f"reconstruct_pair_spectrum: gamma_ij={gamma_ij:.3f} queried to "
+                        f"t_max={t_max:.2f}, but the scan only covers t<={times_bounds[-1]:.2f} "
+                        f"-- {discarded_frac:.1%} of this pair's weight (by integrated area) "
+                        f"lies past the scan's coverage and is silently dropped.",
+                        stacklevel=2,
+                    )
+
     mask = (weights_times >= times_bounds[0]) & (weights_times <= t_hi)
     t_comp = weights_times[mask]
     if len(t_comp) == 0 or t_comp[-1] < t_hi:
