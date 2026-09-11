@@ -346,7 +346,7 @@ def generate_surrogate(model, root: Path, tag_label: str,
                        time_factor: float = 1.5,
                        omega_min_gamma_factor: float = 1.5,
                        dgamma_ij: float = 0.4,
-                       dt: float = 2.0,
+                       dt: Optional[float] = None,
                        n_k: int = 51,
                        n_min: int = 128,
                        panels_per_oscillation: int = 40,
@@ -405,6 +405,17 @@ def generate_surrogate(model, root: Path, tag_label: str,
         raise ValueError("n_omega must be >= 2")
 
     kin = model.kinematics
+
+    if dt is None:
+        # A fixed absolute dt gives wildly different RELATIVE time resolution
+        # across potentials with different physical size: dt=2.0 (this
+        # function's old hardcoded default) gives dt/d=14.4% at the lowest
+        # (gamma=1) row for lb=0.84 (rmid_0=6.94), but dt/d=96% -- the
+        # collision's entire active window covered by under one time step --
+        # for lb=0.069 (rmid_0=1.00), since d(gamma=1)=2*rmid_0 scales with
+        # the potential but dt didn't. Scale dt to rmid_0 so every potential
+        # gets the same relative resolution lb=0.84's dt=2.0 was validated at.
+        dt = 2.0 * model.instanton.rmid_0 / 6.9364
 
     def time_at_gamma(gamma):
         if gamma <= 1.0:
