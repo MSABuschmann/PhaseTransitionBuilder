@@ -71,9 +71,10 @@ def _two_bubble_ic(profile, gamma: float, dz: float,
     to (e.g. a shared T_MAX forced across every row of a multi-gamma scan,
     which can be far later than this row's own natural cutoff for
     small-gamma/small-d rows). The trailing vacuum padding is sized to stay
-    causally ahead of whichever of the row's own estimate or t_horizon is
-    larger, so a row forced to run long doesn't have its wall/signal
-    reflect off the domain edge partway through.
+    causally ahead of smax = max(1.2*d, t_horizon) -- matching the actual
+    s-evolution endpoint write_2d_setup uses (see its own smax computation)
+    -- so a row forced to run long doesn't have its wall/signal reflect off
+    the domain edge partway through.
     """
     r_out = profile.rout_0
     r_in  = profile.rin_0
@@ -135,17 +136,14 @@ def _two_bubble_ic(profile, gamma: float, dz: float,
     z_comb   = -z_comb[::-1] + d / 2.0
 
     # Add trailing zeros (vacuum region beyond the outer bubble wall).
-    # t_horizon, when known, IS this row's actual run extent -- it will
-    # never be integrated past it, so that's what the domain needs to stay
-    # causally ahead of, not the row's own natural-cutoff heuristic. Using
-    # max(t_max_approx, t_horizon) here would be safe but wasteful: it'd
-    # keep oversizing high-gamma rows whose own heuristic happens to exceed
-    # a smaller shared t_horizon, paying for padding that's never reached.
-    # Only fall back to the heuristic when no horizon is given at all (e.g.
-    # callers outside write_2d_setup that don't know it).
-    t_max_approx = 12.0 / 9.0 * d + 7.0 * (3.0 / 40.0 * d) + 0.5 * r_out
-    if t_horizon > 0.:
-        t_max_approx = t_horizon
+    # The domain must stay causally ahead of smax = max(1.2*d, t_horizon) --
+    # the actual s-evolution endpoint (write_2d_setup writes this same value
+    # as the "smax" attribute the integrator runs to) -- not a separately
+    # guessed heuristic. Matching write_2d_setup's own formula here (rather
+    # than t_horizon alone) matters for high-gamma rows where 1.2*d exceeds
+    # a smaller shared t_horizon: the field still evolves out to 1.2*d there,
+    # so sizing the domain to t_horizon alone would undersize it again.
+    t_max_approx = max(1.2 * d, t_horizon)
     extra_length = (d / 2.0 + t_max_approx + r_out) * 1.1 - z_comb[-1]
     extra_n      = int(round(extra_length / dz))
     if extra_n > 0:
@@ -220,7 +218,15 @@ def write_2d_setup(model, gamma: float, times: np.ndarray,
 
     t_0, t_cut, t_m, t_max = _cutoff_times(d, p.cutoff_type, p.t_0_scal,
                                             t_min_global)
-    smax = 1.2 * d
+    # smax is the actual s-evolution endpoint the integrator runs to (steps =
+    # smax/ds) -- NOT just a domain-padding heuristic. A late requested output
+    # time T is reached via s = sqrt(T^2 - rho^2) at large transverse rho, so
+    # querying T > smax doesn't error; it silently drops the near-axis (small
+    # rho) contribution, which needs s > smax and is never computed. Must
+    # cover t_min_global, but never shrink below 1.2*d -- that baseline is
+    # what the analytic cutoff window (_cutoff_times, computed independently
+    # above) assumes has enough runway to decay.
+    smax = max(1.2 * d, t_min_global)
 
     n_z_half = len(z)
     dz_act   = float(z[1] - z[0])
