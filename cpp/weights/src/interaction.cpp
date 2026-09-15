@@ -14,13 +14,6 @@ static double plane_dist(const Eigen::Vector3d &nxhat,
     return nxhat.dot(c - cx);
 }
 
-static Eigen::Vector3d minimum_image(const Eigen::Vector3d &delta, double L) {
-    Eigen::Vector3d out = delta;
-    for (int k = 0; k < 3; ++k)
-        out[k] -= L * std::round(out[k] / L);
-    return out;
-}
-
 static void other_circle(const Eigen::Vector3d &c2, double R2,
                           const Eigen::Vector3d &nxhat,
                           const Eigen::Vector3d &cx,
@@ -104,26 +97,21 @@ static double remaining_arc(
 // Main pair-weight computation
 // ---------------------------------------------------------------------------
 
-void ComputePairWeight(size_t test, size_t other,
+bool ComputePairWeight(const Eigen::Vector3d &c0, const Eigen::Vector3d &c1,
+                       int real_i, int real_j,
                        const WeightsSetup &setup,
                        std::vector<double> &weight) {
     const int n_t = setup.n_t;
     weight.assign(n_t, 0.);
 
-    const Eigen::Vector3d &c0 = setup.pos[test];
-    // Work in an unwrapped local frame: c1 is the nearest periodic image of
-    // `other` relative to c0.  The original implementation achieved the same
-    // thing by explicitly creating 27 ghost copies of every bubble.
-    const Eigen::Vector3d c1 =
-        c0 + minimum_image(setup.pos[other] - c0, setup.L);
     Eigen::Vector3d nxhat = (c1 - c0).normalized();
+    double d = (c1 - c0).norm();
+    if (d < 1e-9) return false;   // coincident images, not a real pair
 
     // Build a frame (u, v) perpendicular to nxhat
     Eigen::Vector3d ax = {0.12345, 0.42134625, 0.14542456};
     Eigen::Vector3d u  = ax.cross(nxhat).normalized();
     Eigen::Vector3d v  = u.cross(nxhat);
-
-    double d = (c1 - c0).norm();
 
     // Find first collision time index
     int i_tcol  = -1;
@@ -144,16 +132,14 @@ void ComputePairWeight(size_t test, size_t other,
         }
     }
 
-    // In a periodic box an unwrapped collision centre need not lie in the
-    // principal [0,L)^3 cell.  It is nevertheless a physical collision.
-    if (i_tcol < 0) return;
+    if (i_tcol < 0) return false;
 
     for (int i_t = i_tcol; i_t < n_t; ++i_t) {
         std::vector<std::pair<double,double>> sections;
         double R2 = setup.R[i_t];
 
         for (int b = 0; b < setup.n_b; ++b) {
-            if (b == static_cast<int>(test) || b == static_cast<int>(other))
+            if (b == real_i || b == real_j)
                 continue;
             // Include the same 3x3x3 periodic images used by the reference
             // GetGhosts implementation.  Start around the image nearest to
@@ -191,50 +177,91 @@ void ComputePairWeight(size_t test, size_t other,
             weight[i_t] = arc / (2.*M_PI);
         }
     }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
-// All pairs
+// All pairs, including collisions through the periodic boundary
 // ---------------------------------------------------------------------------
 
 void FindAllCollisionWeights(const WeightsSetup &setup,
                               std::vector<double> &flat_weights,
-                              std::vector<std::pair<int,int>> &collision_pairs) {
+                              std::vector<std::pair<int,int>> &collision_pairs,
+                              std::vector<double> &pair_d) {
     const int n_b = setup.n_b;
+    const double L = setup.L;
 
-    // First pass: find which pairs actually collide (inside the box)
-    // We do this single-threaded to build the pair list
-    struct PairEntry { int i, j; std::vector<double> w; };
-    std::vector<PairEntry> pairs;
+    // The 27 periodic offsets (including zero, the direct/native position).
+    // Every candidate pair below shifts only the "j" side by one of these --
+    // a bijection onto the 27 physically distinct relative configurations of
+    // a pair, so (unlike shifting both sides) no configuration is ever
+    // reachable two different ways and nothing can be double-counted.
+    std::vector<Eigen::Vector3d> offsets;
+    offsets.reserve(27);
+    for (int sx = -1; sx <= 1; ++sx)
+        for (int sy = -1; sy <= 1; ++sy)
+            for (int sz = -1; sz <= 1; ++sz)
+                offsets.push_back(L * Eigen::Vector3d(sx, sy, sz));
+
+    std::vector<std::pair<int,int>> real_pairs;
+    for (int i = 0; i < n_b; ++i)
+        for (int j = i; j < n_b; ++j)
+            real_pairs.push_back({i, j});
+    const int n_p = static_cast<int>(real_pairs.size());
+
+    struct Entry { int i, j; double d; bool is_direct; std::vector<double> w; };
+    std::vector<Entry> entries;
 
 #pragma omp parallel
     {
-        std::vector<PairEntry> local_pairs;
+        std::vector<Entry> local;
 
 #pragma omp for schedule(dynamic) nowait
-        for (int i = 0; i < n_b; ++i) {
-            for (int j = i + 1; j < n_b; ++j) {
+        for (int p = 0; p < n_p; ++p) {
+            int i = real_pairs[p].first, j = real_pairs[p].second;
+            const Eigen::Vector3d &c0 = setup.pos[i];
+
+            for (const Eigen::Vector3d &off : offsets) {
+                if (i == j && off.isZero(0)) continue;   // no self-collision
+                Eigen::Vector3d c1 = setup.pos[j] + off;
+
                 std::vector<double> w;
-                ComputePairWeight(i, j, setup, w);
-                // Check if any weight is non-zero (collision inside box)
+                if (!ComputePairWeight(c0, c1, i, j, setup, w))
+                    continue;
                 bool any = false;
                 for (double wi : w) if (wi > 0.) { any = true; break; }
-                if (any) local_pairs.push_back({i, j, std::move(w)});
+                if (any) local.push_back({i, j, (c1 - c0).norm(), off.isZero(0),
+                                          std::move(w)});
             }
         }
 
 #pragma omp critical
         {
-            for (auto &p : local_pairs)
-                pairs.push_back(std::move(p));
+            for (auto &e : local)
+                entries.push_back(std::move(e));
         }
     }
+
+    // OMP scheduling makes the merge order above nondeterministic -- fix a
+    // canonical order so callers that only look at the first entry per (i,j)
+    // (e.g. an isolated two-bubble comparison) reliably get the direct,
+    // non-periodic collision, with any periodic images following sorted by
+    // distance.
+    std::stable_sort(entries.begin(), entries.end(),
+                     [](const Entry &a, const Entry &b) {
+                         if (a.i != b.i) return a.i < b.i;
+                         if (a.j != b.j) return a.j < b.j;
+                         if (a.is_direct != b.is_direct) return a.is_direct;
+                         return a.d < b.d;
+                     });
 
     // Flatten: flat_weights[pair * n_t + i_t]
     flat_weights.clear();
     collision_pairs.clear();
-    for (const auto &p : pairs) {
-        collision_pairs.push_back({p.i, p.j});
-        flat_weights.insert(flat_weights.end(), p.w.begin(), p.w.end());
+    pair_d.clear();
+    for (const auto &e : entries) {
+        collision_pairs.push_back({e.i, e.j});
+        pair_d.push_back(e.d);
+        flat_weights.insert(flat_weights.end(), e.w.begin(), e.w.end());
     }
 }

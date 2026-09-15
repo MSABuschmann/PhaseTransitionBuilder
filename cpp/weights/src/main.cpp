@@ -68,7 +68,8 @@ int main(int argc, char *argv[]) {
 
     std::vector<double>            flat_weights;
     std::vector<std::pair<int,int>> collision_pairs;
-    FindAllCollisionWeights(setup, flat_weights, collision_pairs);
+    std::vector<double>            pair_dist;
+    FindAllCollisionWeights(setup, flat_weights, collision_pairs, pair_dist);
 
     int n_pairs = static_cast<int>(collision_pairs.size());
     std::cout << "Collisions found: " << n_pairs << "\n";
@@ -78,11 +79,13 @@ int main(int argc, char *argv[]) {
     // Gamma = (rout_0 - rin_0) / (R_out(t_m) - R_in(t_m)), where
     // t_m^2 = d^2/4 - collision_r0^2.  Only for the "out" convention is
     // R_out(t_m)=d/2; retaining both evolved radii also handles "mid".
-    // d uses the minimum-image convention for periodic boundary conditions.
+    // d is the specific periodic image's separation found by
+    // FindAllCollisionWeights -- the same real bubble pair can appear more
+    // than once here (once directly, once through the periodic boundary),
+    // each with its own d and gamma.
     const double rout_0 = setup.rout_0;
     const double rin_0  = setup.rin_0;
     const double collision_r0 = setup.collision_r0;
-    const double L      = setup.L;
     const double w0     = rout_0 - rin_0;
 
     std::vector<double> pair_i(n_pairs), pair_j(n_pairs), gammas(n_pairs);
@@ -90,10 +93,7 @@ int main(int argc, char *argv[]) {
         pair_i[p] = collision_pairs[p].first;
         pair_j[p] = collision_pairs[p].second;
 
-        Eigen::Vector3d dp = setup.pos[pair_i[p]] - setup.pos[pair_j[p]];
-        for (int k = 0; k < 3; ++k)
-            dp[k] -= L * std::round(dp[k] / L);
-        double d      = dp.norm();
+        double d      = pair_dist[p];
         double tm_sq  = std::max(0., d*d/4. - collision_r0*collision_r0);
         double R_out_m = std::sqrt(rout_0*rout_0 + tm_sq);
         double R_in_m = std::sqrt(rin_0*rin_0 + tm_sq);

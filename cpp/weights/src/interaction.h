@@ -15,15 +15,30 @@ struct WeightsSetup {
     std::vector<Eigen::Vector3d> pos;  // positions    [n_b]
 };
 
-// Compute arc-length weight for a colliding pair (test, other) at each time.
-// Pair geometry and occlusion use periodic images in the box of side L.
+// Compute the collision-arc weight for one candidate periodic image of a
+// bubble pair, given the pair's own already-shifted absolute positions c0,
+// c1 (c0 is always the real bubble's own, unshifted position; c1 may be a
+// periodic ghost copy of the other bubble).  real_i, real_j are the
+// underlying real bubble indices -- used to exclude this pair from its own
+// third-body occlusion check (occlusion still searches all periodic images
+// of every other real bubble).
 // weight[i_t] = fraction of collision-circle arc NOT blocked by other bubbles.
-void ComputePairWeight(size_t test, size_t other,
+// Returns false (weight left all-zero) if this image never collides.
+bool ComputePairWeight(const Eigen::Vector3d &c0, const Eigen::Vector3d &c1,
+                       int real_i, int real_j,
                        const WeightsSetup &setup,
                        std::vector<double> &weight);
 
-// Compute all pairwise weights and store in flat vector (n_pairs * n_t).
-// Also fills collision_pairs with (i, j) indices of colliding pairs.
+// Search every periodic image of every bubble pair (including a bubble
+// against its own periodic image) for collisions.  Only the "other" bubble
+// is ever shifted (c0 = pos[i] always, c1 = pos[j] + one of the 27 periodic
+// offsets) -- a bijection onto the 27 physically distinct relative
+// configurations of a pair, so nothing is ever double-counted and no
+// box-membership filtering is needed.  A real bubble pair that collides
+// more than once -- once directly, once again through the periodic
+// boundary -- produces more than one entry here, each with its own
+// distance (pair_d) and weight curve.
 void FindAllCollisionWeights(const WeightsSetup &setup,
                               std::vector<double> &flat_weights,
-                              std::vector<std::pair<int,int>> &collision_pairs);
+                              std::vector<std::pair<int,int>> &collision_pairs,
+                              std::vector<double> &pair_d);
