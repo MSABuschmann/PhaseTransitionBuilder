@@ -566,10 +566,10 @@ def load_weights(path: Path, n_t: int) -> tuple:
                 f"{path} has no collision_radius metadata; regenerate or "
                 "relabel it explicitly before use"
             )
-        if str(f.attrs["collision_radius"]) not in ("mid", "out"):
+        if str(f.attrs["collision_radius"]) not in ("mid", "out", "in"):
             raise ValueError(
                 f"{path} has unrecognized collision_radius="
-                f"{f.attrs['collision_radius']!r}; must be 'mid' or 'out'"
+                f"{f.attrs['collision_radius']!r}; must be 'mid', 'out', or 'in'"
             )
         flat   = f["weights"][:]
         pair_i = f["pair_i"][:].astype(int)
@@ -701,13 +701,13 @@ def write_weights_input(path: Path, positions: np.ndarray, t: np.ndarray,
     positions = np.asarray(positions, dtype=float)
     t         = np.asarray(t,         dtype=float)
     n_b, n_t  = len(positions), len(t)
-    if collision_radius not in ("mid", "out"):
-        raise ValueError("collision_radius must be 'mid' or 'out'")
+    if collision_radius not in ("mid", "out", "in"):
+        raise ValueError("collision_radius must be 'mid', 'out', or 'in'")
     R         = kinematics.R(t, t_init=t_init, r=collision_radius)
     rout_0    = float(kinematics.profile.rout_0)
     rin_0     = float(kinematics.profile.rin_0)
     rmid_0    = float(kinematics.profile.rmid_0)
-    collision_r0 = rmid_0 if collision_radius == "mid" else rout_0
+    collision_r0 = {"mid": rmid_0, "out": rout_0, "in": rin_0}[collision_radius]
 
     with h5py.File(path, "w") as f:
         f.attrs["L"]      = float(L)
