@@ -486,6 +486,65 @@ def reconstruct_pair_spectrum(gamma_ij: float, weights_t: np.ndarray,
     return (w[:len(t_comp) - 1, None] * delta).sum(axis=0)
 
 
+def reconstruct_pair_spectrum_series(gamma_ij: float, weights_t: np.ndarray,
+                                     weights_times: np.ndarray, t_query: np.ndarray,
+                                     interp_fn, times_bounds: np.ndarray,
+                                     gammas: np.ndarray) -> np.ndarray:
+    """
+    Same result as calling reconstruct_pair_spectrum(..., t_max, ...) once
+    per entry of t_query, but O(n_weights) total instead of
+    O(n_weights * len(t_query)): integrates the cumulative w(t)*dspec once
+    over weights_times, then linearly interpolates that cumulative curve
+    onto t_query. weights_times is dense (hundreds-to-thousands of points)
+    relative to any realistic t_query, so this is not a separate
+    approximation -- just reading off the same cumulative integral at many
+    points instead of recomputing it from scratch at each one.
+
+    Returns array of shape (len(t_query), len(k_out)).
+    """
+    g = float(np.clip(gamma_ij, gammas.min(), gammas.max()))
+    t_lo, t_scan_hi = times_bounds[0], times_bounds[-1]
+    t_query = np.asarray(t_query, dtype=float)
+
+    mask = (weights_times >= t_lo) & (weights_times <= t_scan_hi)
+    t_comp = weights_times[mask]
+    if len(t_comp) == 0 or t_comp[-1] < t_scan_hi:
+        t_comp = np.append(t_comp, t_scan_hi)
+    w = np.interp(t_comp, weights_times, weights_t)
+    pts = np.column_stack([np.full(len(t_comp), g), t_comp])
+    specs = interp_fn(pts)
+    delta = np.diff(specs, axis=0)
+    contrib = w[:len(t_comp) - 1, None] * delta
+    cum = np.vstack([np.zeros((1, specs.shape[1])), np.cumsum(contrib, axis=0)])
+
+    t_max_q = float(t_query.max()) if len(t_query) else t_lo
+    if t_max_q > t_scan_hi:
+        full_mask = (weights_times >= t_lo) & (weights_times <= t_max_q)
+        if full_mask.sum() >= 2:
+            wt_full, tt_full = weights_t[full_mask], weights_times[full_mask]
+            total_weight = np.trapz(wt_full, tt_full)
+            if total_weight > 0:
+                used = tt_full <= t_scan_hi
+                used_weight = np.trapz(wt_full[used], tt_full[used]) if used.sum() >= 2 else 0.
+                discarded_frac = 1. - used_weight / total_weight
+                if discarded_frac > 1e-3:
+                    warnings.warn(
+                        f"reconstruct_pair_spectrum_series: gamma_ij={gamma_ij:.3f} queried up to "
+                        f"t_max={t_max_q:.2f}, but the scan only covers t<={t_scan_hi:.2f} "
+                        f"-- {discarded_frac:.1%} of this pair's weight (by integrated area) "
+                        f"lies past the scan's coverage and is silently dropped.",
+                        stacklevel=2,
+                    )
+
+    t_clamped = np.clip(t_query, t_lo, t_scan_hi)
+    idx = np.clip(np.searchsorted(t_comp, t_clamped, side='right') - 1, 0, len(t_comp) - 2)
+    t0, t1 = t_comp[idx], t_comp[idx + 1]
+    frac = np.where(t1 > t0, (t_clamped - t0) / np.where(t1 > t0, t1 - t0, 1.), 0.)
+    out = cum[idx] + frac[:, None] * (cum[idx + 1] - cum[idx])
+    out[t_query < t_lo] = 0.
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Weights I/O
 # ---------------------------------------------------------------------------
