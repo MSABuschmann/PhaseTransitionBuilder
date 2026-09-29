@@ -1,6 +1,7 @@
 #pragma once
 
 #include <H5Cpp.h>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -32,6 +33,19 @@ public:
         smax         = read_attr_double(file, "smax");
         gamma_ij     = read_attr_double(file, "gamma_ij");
 
+        // Wall-radius profile -- only present in setup files written after
+        // the wall-energy diagnostic was added; older production setup.h5
+        // files (which never need these) default to NaN rather than
+        // hard-failing to load.
+        auto read_opt = [&](const char *name) {
+            return file.attrExists(name)
+                 ? read_attr_double(file, name)
+                 : std::numeric_limits<double>::quiet_NaN();
+        };
+        rin_0  = read_opt("rin_0");
+        rmid_0 = read_opt("rmid_0");
+        rout_0 = read_opt("rout_0");
+
         // --- potential ---
         potential = potential_from_hdf5(file.openGroup("potential"));
 
@@ -47,6 +61,7 @@ public:
 
     // doubles
     double d, ds, t_0, t_cut, t_m, t_max, smax, gamma_ij;
+    double rin_0, rmid_0, rout_0;
 
     // potential (owned)
     std::unique_ptr<Potential> potential;

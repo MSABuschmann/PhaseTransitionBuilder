@@ -13,6 +13,7 @@ Evolution::Evolution(const Setup &setup)
     : Evolution(setup,
                 [this](const std::vector<double> &snap, double s, bool) {
                     phicomplete.push_back(snap);
+                    picomplete.push_back(pi);   // pi as advanced to this snapshot's s
                     slist.push_back(s);
                 },
                 true)
@@ -69,15 +70,25 @@ void Evolution::EvolvepiFirstHalfStep(int n_baby) {
     // Sub-step ds/2 in n_baby-1 increments from s=0 to s≈ds/2
     double baby_ds = (0.5 * ds) / static_cast<double>(n_baby - 1);
 
-    for (int i = 1; i < n_baby; ++i) {
-        double s = (i - 1) * baby_ds;
-#pragma omp parallel for
-        for (int i_z = 0; i_z < n_z; ++i_z)
-            pi[i_z] = EvolvePi(i_z, s, baby_ds);
-
-#pragma omp parallel for
-        for (int i_z = 0; i_z < n_z; ++i_z)
-            phi[i_z] += baby_ds * pi[i_z];
+    // Single parallel region for the whole baby-step loop (not one fork/join
+    // per iteration), with EXPLICIT barriers between phases -- TSan caught a
+    // real data race on this system's libomp even between two `#pragma omp
+    // for` constructs in the same region relying only on the implicit
+    // end-of-for barrier, so don't rely on it: barrier explicitly after
+    // every phase that the next phase's reads depend on.
+#pragma omp parallel
+    {
+        for (int i = 1; i < n_baby; ++i) {
+            double s = (i - 1) * baby_ds;
+#pragma omp for
+            for (int i_z = 0; i_z < n_z; ++i_z)
+                pi[i_z] = EvolvePi(i_z, s, baby_ds);
+#pragma omp barrier
+#pragma omp for
+            for (int i_z = 0; i_z < n_z; ++i_z)
+                phi[i_z] += baby_ds * pi[i_z];
+#pragma omp barrier
+        }
     }
 }
 
@@ -86,25 +97,41 @@ void Evolution::Evolve() {
 
     int n_print = std::max(n_steps / 20, 1);
 
-    for (int i = 1; i <= n_steps; ++i) {
-        if (i % n_print == 0)
-            std::cout << "Evolution: step " << i << " / " << n_steps << "\n";
+    // Single parallel region for the whole step loop, with EXPLICIT barriers
+    // between phases -- see EvolvepiFirstHalfStep's comment: TSan caught a
+    // real data race on this system's libomp even between two `#pragma omp
+    // for` constructs relying only on the implicit end-of-for barrier, so
+    // don't rely on it. All threads evaluate `i`/`i>1`/`i%how_often_ds`
+    // identically (loop-invariant across the team), so branching around the
+    // work-sharing constructs is safe. `#pragma omp single` (progress print,
+    // snapshot sink) has its own implicit barrier at its end.
+#pragma omp parallel
+    {
+        for (int i = 1; i <= n_steps; ++i) {
+#pragma omp single
+            {
+                if (i % n_print == 0)
+                    std::cout << "Evolution: step " << i << " / " << n_steps << "\n";
+            }
 
-        // Full pi step (skip first — pi was already advanced by baby steps)
-        if (i > 1) {
             double s = (i - 1) * ds;
-#pragma omp parallel for
+            if (i > 1) {
+#pragma omp for
+                for (int i_z = 0; i_z < n_z; ++i_z)
+                    pi[i_z] = EvolvePi(i_z, s, ds);
+#pragma omp barrier
+            }
+#pragma omp for
             for (int i_z = 0; i_z < n_z; ++i_z)
-                pi[i_z] = EvolvePi(i_z, s, ds);
+                phi[i_z] += ds * pi[i_z];
+#pragma omp barrier
+
+            if (i % how_often_ds == 0) {
+#pragma omp single
+                {
+                    sink_(phi, i * ds, i == last_saved_i_);
+                }
+            }
         }
-
-        // phi step
-#pragma omp parallel for
-        for (int i_z = 0; i_z < n_z; ++i_z)
-            phi[i_z] += ds * pi[i_z];
-
-        // Save snapshot every how_often_ds steps
-        if (i % how_often_ds == 0)
-            sink_(phi, i * ds, i == last_saved_i_);
     }
 }

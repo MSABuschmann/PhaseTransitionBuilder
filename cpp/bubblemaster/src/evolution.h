@@ -19,7 +19,8 @@ public:
     //
     // Streaming construction: does NOT populate phicomplete/slist (they stay
     // empty) — GetPhi()/GetSlist() must not be called on an instance built
-    // this way. Used only by the GPU binary's bounded-memory batching path;
+    // this way. Used by the GPU binary's bounded-memory batching path and
+    // the CPU binary's --wall-radius-scan;
     // the physics recurrence itself is unchanged (Evolve() only ever reads
     // the *current* phi/pi arrays, never past snapshots).
     using SnapshotSink =
@@ -28,6 +29,10 @@ public:
 
     // Returns the saved field snapshots: phicomplete[i_s][i_z]
     const std::vector<std::vector<double>> &GetPhi()   const { return phicomplete; }
+    // pi = dphi/ds at the same snapshots as GetPhi() -- only populated by
+    // the default (whole-history) constructor; empty for the streaming
+    // constructor (unused by any current caller -- see its own comment).
+    const std::vector<std::vector<double>> &GetPi()    const { return picomplete; }
     const std::vector<double>              &GetSlist()  const { return slist; }
     double                                  GetDS()     const { return ds_out; }
 
@@ -48,8 +53,9 @@ private:
     std::vector<double> pi;
     std::vector<double> slist;    // s values for saved snapshots
 
-    // snapshots: phicomplete[i_snapshot][i_z]
+    // snapshots: phicomplete[i_snapshot][i_z], picomplete[i_snapshot][i_z]
     std::vector<std::vector<double>> phicomplete;
+    std::vector<std::vector<double>> picomplete;
 
     double ds_out; // effective ds between saved snapshots = ds * how_often_ds
 

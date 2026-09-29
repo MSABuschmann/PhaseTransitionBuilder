@@ -45,3 +45,49 @@ void SaveFields(const std::string &output_dir,
     write_vector(file, "s", slist);
     write_vector(file, "z", z);
 }
+
+void SaveWallEnergy(const std::string &output_dir, const WallEnergyResult &res,
+                    double gamma_ij) {
+    std::string path = output_dir + "wall_energy.h5";
+    H5::H5File file(path, H5F_ACC_TRUNC);
+    write_attr_double(file, "gamma_ij", gamma_ij);
+    write_vector(file, "s",                res.s);
+    write_vector(file, "e_colliding",      res.e_colliding);
+    write_vector(file, "e_undisturbed",    res.e_undisturbed);
+    write_vector(file, "valid_colliding",  res.valid_colliding);
+    write_vector(file, "valid_undisturbed", res.valid_undisturbed);
+    write_vector(file, "z_lo_colliding",   res.z_lo_colliding);
+    write_vector(file, "z_hi_colliding",   res.z_hi_colliding);
+    write_vector(file, "z_lo_undisturbed", res.z_lo_undisturbed);
+    write_vector(file, "z_hi_undisturbed", res.z_hi_undisturbed);
+    write_attr_double(file, "s_collision", res.s_collision);
+}
+
+void SavePatchMoments(const std::string &output_dir, const PatchMomentsResult &res,
+                      double gamma_ij, double s_c, double delta_c, double z_max) {
+    std::string path = output_dir + "patch_moments.h5";
+    H5::H5File file(path, H5F_ACC_TRUNC);
+    write_attr_double(file, "gamma_ij", gamma_ij);
+    write_attr_double(file, "s_c", s_c);
+    write_attr_double(file, "delta_c", delta_c);
+    write_attr_double(file, "z_max", z_max);
+    write_vector(file, "s_A",    res.s_A);
+    write_vector(file, "A",      res.A);
+    write_vector(file, "zcut_A", res.zcut_A);
+    write_vector(file, "R_in_A", res.R_in_A);
+    write_vector(file, "s_B",    res.s_B);
+    write_vector(file, "B",      res.B);
+    write_vector(file, "zcut_B", res.zcut_B);
+}
+
+void SaveWallRadiusScan(const std::string &output_dir, const WallRadiusResult &res,
+                        double gamma_ij) {
+    std::string path = output_dir + "wall_radius_scan.h5";
+    H5::H5File file(path, H5F_ACC_TRUNC);
+    write_attr_double(file, "gamma_ij", gamma_ij);
+    write_vector(file, "s",     res.s);
+    write_vector(file, "R_mid", res.R_mid);
+    write_vector(file, "R_in",  res.R_in);
+    write_vector(file, "R_out", res.R_out);
+    write_vector(file, "valid", res.valid);
+}

@@ -267,6 +267,16 @@ def write_2d_setup(model, gamma: float, times: np.ndarray,
         f.attrs["collision_r0"] = float(
             profile.rmid_0 if p.collision_radius == "mid" else profile.rout_0
         )
+        # Wall-radius profile -- not otherwise derivable from the C++ Setup
+        # class, which only reads z/phi0/d. Only ONE bubble is explicitly
+        # simulated, centred at z=d/2; z=0 is a reflecting boundary standing
+        # in for its mirror-image collision partner (not a second bubble's
+        # own centre). Used by the wall-energy diagnostic to locate the
+        # colliding-side (toward z=0) and undisturbed-side (toward +z)
+        # windows without re-deriving the geometry.
+        f.attrs["rin_0"]  = float(profile.rin_0)
+        f.attrs["rmid_0"] = float(profile.rmid_0)
+        f.attrs["rout_0"] = float(profile.rout_0)
         f.attrs["dz_target"] = float(dz_target)
         f.attrs["wall_points_target"] = (
             float(p.wall_points) if p.wall_points is not None else np.nan

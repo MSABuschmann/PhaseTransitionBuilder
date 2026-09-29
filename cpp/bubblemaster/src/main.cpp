@@ -9,6 +9,8 @@
 #include "evolution.h"
 #include "io.h"
 #include "setup.h"
+#include "wall_energy.h"
+#include "wall_radius.h"
 
 #ifdef USE_GPU
 #  include "checkpoint_io.h"
@@ -40,7 +42,8 @@ int main(int argc, char *argv[]) {
         std::cerr << "Usage: bubblemaster <setup.h5> <output_dir/>"
                      " [--save-fields] [--save-amplitude] [--param N]"
                      " [--filon-panels-per-osc N] [--s-batch-size N]"
-                     " [--overwrite] [--checkpoint-interval-minutes N]\n"
+                     " [--overwrite] [--checkpoint-interval-minutes N]"
+                     " [--wall-energy] [--wall-radius-scan] [--wall-radius-every N]\n"
                      "  --param N         Filon: N_min panels; GSL: subinterval limit\n"
                      "  --filon-panels-per-osc N  GPU Filon panels per Bessel oscillation\n"
                      "  --s-batch-size N  GPU only: s-slices streamed per batch (default 128)\n"
@@ -50,7 +53,23 @@ int main(int argc, char *argv[]) {
                      "                    (default: auto-detect and resume/extend instead --\n"
                      "                    see GpuIntegrator's Checkpoint/StreamCheckpoint)\n"
                      "  --checkpoint-interval-minutes N  GPU only: how often to write a\n"
-                     "                    mid-stream progress checkpoint (default 10)\n";
+                     "                    mid-stream progress checkpoint (default 10)\n"
+                     "  --wall-energy     CPU only: instead of the GW spectral integral,\n"
+                     "                    write wall_energy.h5 (colliding-side vs\n"
+                     "                    undisturbed-side wall energy over s). Combine with\n"
+                     "                    --save-fields to also get the tracked z-window\n"
+                     "                    boundaries, for overlaying on the field plot.\n"
+                     "  --wall-radius-scan  CPU only: instead of the GW spectral integral,\n"
+                     "                    write wall_radius_scan.h5 (R_mid/R_in/R_out over s,\n"
+                     "                    measured directly from the undisturbed side's actual\n"
+                     "                    gradient-energy peak/half-max points). Streams:\n"
+                     "                    never holds the field history in memory.\n"
+                     "  --wall-radius-every N  with --wall-radius-scan: measure only every\n"
+                     "                    Nth saved snapshot (plus the last; default 1)\n"
+                     "  --patch-moments --patch-sc S --patch-deltac D  CPU only: instead of the\n"
+                     "                    GW integral, write patch_moments.h5 (wake-window\n"
+                     "                    moments A(s), B(s) for the patch-fraction calibration,\n"
+                     "                    window |z| < 4 D + max(s - S, 0)). Streams.\n";
         return 1;
     }
 
@@ -63,6 +82,11 @@ int main(int argc, char *argv[]) {
     int  s_batch_size   = 128;  // locked production value
     bool overwrite      = false;
     double checkpoint_interval_minutes = 10.0;
+    bool wall_energy    = false;
+    bool wall_radius_scan = false;
+    int  wall_radius_every = 1;
+    bool patch_moments = false;
+    double patch_sc = -1., patch_deltac = -1.;
     for (int i = 3; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--save-fields")
@@ -79,6 +103,46 @@ int main(int argc, char *argv[]) {
             overwrite = true;
         else if (a == "--checkpoint-interval-minutes" && i + 1 < argc)
             checkpoint_interval_minutes = std::atof(argv[++i]);
+        else if (a == "--wall-energy")
+            wall_energy = true;
+        else if (a == "--wall-radius-scan")
+            wall_radius_scan = true;
+        else if (a == "--wall-radius-every" && i + 1 < argc)
+            wall_radius_every = std::atoi(argv[++i]);
+        else if (a == "--patch-moments")
+            patch_moments = true;
+        else if (a == "--patch-sc" && i + 1 < argc)
+            patch_sc = std::atof(argv[++i]);
+        else if (a == "--patch-deltac" && i + 1 < argc)
+            patch_deltac = std::atof(argv[++i]);
+    }
+#ifdef USE_GPU
+    if (wall_energy) {
+        std::cerr << "--wall-energy is CPU only (it uses the CPU "
+                     "Evolution's per-snapshot phi, not produced by the GPU "
+                     "on-device evolution path); use the CPU binary.\n";
+        return 1;
+    }
+    if (wall_radius_scan) {
+        std::cerr << "--wall-radius-scan is CPU only (it uses the CPU "
+                     "Evolution's per-snapshot phi, not produced by the GPU "
+                     "on-device evolution path); use the CPU binary.\n";
+        return 1;
+    }
+#endif
+    if (wall_radius_scan && save_fields) {
+        std::cerr << "--wall-radius-scan streams the evolution and never holds "
+                     "the field history, so it can't be combined with "
+                     "--save-fields; run them separately.\n";
+        return 1;
+    }
+    if (patch_moments && (patch_sc < 0. || patch_deltac <= 0.)) {
+        std::cerr << "--patch-moments needs --patch-sc >= 0 and --patch-deltac > 0\n";
+        return 1;
+    }
+    if (wall_radius_every < 1) {
+        std::cerr << "--wall-radius-every must be at least 1\n";
+        return 1;
     }
 
     std::cout << "Setup:  " << setup_path << "\n";
@@ -293,6 +357,52 @@ int main(int argc, char *argv[]) {
     return 0;
 
 #else
+    // --- Patch-fraction calibration moments: streamed, one snapshot at a time. ---
+    if (patch_moments) {
+        auto t_pm = Clock::now();
+        PatchMoments pm(setup, patch_sc, patch_deltac);
+        Evolution evo(setup, [&](const std::vector<double> &phi, double s, bool) {
+            pm.add(phi, s);
+        });
+        SavePatchMoments(output_dir, pm.res, setup.gamma_ij, patch_sc, patch_deltac, setup.z.back());
+        std::cout << "Timing phase=patch_moments seconds=" << elapsed(t_pm) << "\n";
+        std::cout << "Total: " << elapsed(t_start) << " s\n";
+        return 0;
+    }
+
+    // --- Wall-energy diagnostic without --save-fields: stream it the same
+    // way, one snapshot at a time (with --save-fields it runs below on the
+    // stored history instead, since that has to be held anyway). ---
+    if (wall_energy && !save_fields) {
+        auto t_we = Clock::now();
+        WallEnergyResult res;
+        Evolution evo(setup, [&](const std::vector<double> &phi, double s, bool) {
+            append_wall_energy(res, phi, s, setup);
+        });
+        SaveWallEnergy(output_dir, res, setup.gamma_ij);
+        std::cout << "Timing phase=wall_energy seconds=" << elapsed(t_we) << "\n";
+        std::cout << "Total: " << elapsed(t_start) << " s\n";
+        return 0;
+    }
+
+    // --- Wall-radius diagnostic: skip the GW integral entirely and measure
+    // each snapshot as the evolution produces it, via the streaming
+    // Evolution constructor -- memory stays O(n_z) instead of holding the
+    // whole O(n_s*n_z) field history. ---
+    if (wall_radius_scan) {
+        auto t_wr = Clock::now();
+        WallRadiusResult res;
+        long i_snap = 0;
+        Evolution evo(setup, [&](const std::vector<double> &phi, double s, bool is_last) {
+            if (i_snap++ % wall_radius_every == 0 || is_last)
+                append_wall_radius(res, phi, s, setup);
+        });
+        SaveWallRadiusScan(output_dir, res, setup.gamma_ij);
+        std::cout << "Timing phase=wall_radius_scan seconds=" << elapsed(t_wr) << "\n";
+        std::cout << "Total: " << elapsed(t_start) << " s\n";
+        return 0;
+    }
+
     // --- 2. Run 2D Milne evolution (CPU GSL/Filon binaries: unchanged,
     // full-history behavior — they don't have the GPU memory problem) ---
     auto t_evo = Clock::now();
@@ -305,6 +415,17 @@ int main(int argc, char *argv[]) {
 
     if (save_fields)
         SaveFields(output_dir, phi_snaps, evo.GetSlist(), setup.z);
+
+    // --- Wall-energy diagnostic: skip the GW integral entirely, just track
+    // colliding-vs-undisturbed wall energy over s and write it out. ---
+    if (wall_energy) {
+        auto t_we = Clock::now();
+        WallEnergyResult res = compute_wall_energy(evo, setup);
+        SaveWallEnergy(output_dir, res, setup.gamma_ij);
+        std::cout << "Timing phase=wall_energy seconds=" << elapsed(t_we) << "\n";
+        std::cout << "Total: " << elapsed(t_start) << " s\n";
+        return 0;
+    }
 
     // --- 3. Run GW integration for each time index ---
     auto t_integrator_setup = Clock::now();
