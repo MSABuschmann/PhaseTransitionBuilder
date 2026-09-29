@@ -67,22 +67,45 @@ static void normalize_intervals(
     }
 }
 
-static double remaining_arc(
+// Linear interpolation of the tabulated R(t) curve at an arbitrary query
+// time; 0 before the table starts (the bubble hasn't nucleated yet at that
+// look-back time), clamped to the last tabulated value beyond the end.
+static double interp_R(const std::vector<double> &t, const std::vector<double> &R,
+                        double t_query) {
+    if (t_query <= t.front()) return 0.;
+    if (t_query >= t.back())  return R.back();
+    auto it = std::upper_bound(t.begin(), t.end(), t_query);
+    size_t i1 = it - t.begin(), i0 = i1 - 1;
+    double frac = (t_query - t[i0]) / (t[i1] - t[i0]);
+    return R[i0] + frac * (R[i1] - R[i0]);
+}
+
+static void merge_intervals(
         const std::vector<std::pair<double,double>> &remove_sections,
-        double period, double eps = 1e-10) {
-    std::vector<std::pair<double,double>> rem, merged;
+        double period,
+        std::vector<std::pair<double,double>> &merged,
+        double eps = 1e-10) {
+    std::vector<std::pair<double,double>> rem;
     normalize_intervals(rem, remove_sections, period, eps);
     std::sort(rem.begin(), rem.end(),
               [](const auto &a, const auto &b) {
                   return a.first != b.first ? a.first < b.first
                                             : a.second < b.second;
               });
+    merged.clear();
     for (const auto &[s, e] : rem) {
         if (merged.empty() || s > merged.back().second)
             merged.emplace_back(s, e);
         else if (e > merged.back().second)
             merged.back().second = e;
     }
+}
+
+static double remaining_arc(
+        const std::vector<std::pair<double,double>> &remove_sections,
+        double period, double eps = 1e-10) {
+    std::vector<std::pair<double,double>> merged;
+    merge_intervals(remove_sections, period, merged, eps);
     double arc = 0., cur = 0.;
     for (const auto &[rs, re] : merged) {
         if (cur < rs) arc += rs - cur;
@@ -91,6 +114,40 @@ static double remaining_arc(
     }
     if (cur < period) arc += period - cur;
     return arc;
+}
+
+// True if angle theta (any real value) falls inside one of the disjoint,
+// already-merged [0, period)-normalized intervals.
+static bool is_covered(double theta,
+                        const std::vector<std::pair<double,double>> &merged,
+                        double period) {
+    double m = std::fmod(theta, period);
+    if (m < 0.) m += period;
+    for (const auto &[s, e] : merged)
+        if (m >= s && m < e) return true;
+    return false;
+}
+
+// Wall-crossing time of a bubble with the shared nucleation profile
+// (rin_0, rout_0) once its radius has grown to R: the time for its own
+// wall (Lorentz-contracted at this radius) to sweep across a fixed point,
+// dt_wall = sqrt(R^2-rin_0^2) - sqrt(R^2-rout_0^2).  Undefined (returns 0)
+// before the wall has fully formed, R < rout_0.
+static double dt_wall(double R, double rin_0, double rout_0) {
+    if (R < rout_0) return 0.;
+    return std::sqrt(R*R - rin_0*rin_0) - std::sqrt(R*R - rout_0*rout_0);
+}
+
+// Exact local Lorentz factor of a bubble (shared nucleation profile
+// rin_0/rout_0/rmid_0) at the moment its own (mid-radius) radius equals R --
+// same analytic form main.cpp uses per-pair (gamma = w0/(R_out(t_m)-R_in(t_m))),
+// just evaluated from R instead of from a collision distance.
+static double gamma_local(double R, double rin_0, double rout_0, double rmid_0) {
+    double tm_sq = std::max(0., R*R - rmid_0*rmid_0);
+    double R_out_m = std::sqrt(rout_0*rout_0 + tm_sq);
+    double R_in_m  = std::sqrt(rin_0*rin_0 + tm_sq);
+    double denom = R_out_m - R_in_m;
+    return denom > 0. ? (rout_0 - rin_0) / denom : 1.;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,9 +191,38 @@ bool ComputePairWeight(const Eigen::Vector3d &c0, const Eigen::Vector3d &c1,
 
     if (i_tcol < 0) return false;
 
+    // Persistence path (persistence_alpha > 0): track, per fixed angular
+    // bin around the ring, the time and occluding radius at which that bin
+    // was first covered -- so its contribution can decay exponentially
+    // afterwards instead of dropping to zero instantly.  Unused/empty in
+    // the default (cheap, instantaneous-cutoff) path.
+    const bool use_persistence = setup.persistence_alpha > 0.;
+    const int  n_bins = setup.persistence_n_bins;
+    std::vector<double> bin_theta, touched_at, touched_R2, touched_width;
+    std::vector<bool>   ever_uncovered;
+    if (use_persistence) {
+        bin_theta.resize(n_bins);
+        for (int kk = 0; kk < n_bins; ++kk)
+            bin_theta[kk] = (kk + 0.5) * 2.*M_PI / n_bins;
+        touched_at.assign(n_bins, -1.);
+        touched_R2.assign(n_bins, 0.);
+        touched_width.assign(n_bins, 0.);
+        // A bin only starts decaying once it has actually been observed
+        // exposed (uncovered) at some earlier step -- a bin whose ring
+        // patch is already fully shadowed the instant it geometrically
+        // comes into existence never had anything to persist, and must
+        // stay at 0 (matching the hard-cutoff limit), not jump to a
+        // phantom full-strength value at first observation.
+        ever_uncovered.assign(n_bins, false);
+    }
+
     for (int i_t = i_tcol; i_t < n_t; ++i_t) {
         std::vector<std::pair<double,double>> sections;
-        double R2 = setup.R[i_t];
+        // The occluding (third) bubble's own radius, evaluated
+        // occlusion_delay time units in the past -- see WeightsSetup.
+        double R2 = setup.occlusion_delay > 0.
+            ? interp_R(setup.t, setup.R, setup.t[i_t] - setup.occlusion_delay)
+            : setup.R[i_t];
 
         for (int b = 0; b < setup.n_b; ++b) {
             if (b == real_i || b == real_j)
@@ -170,12 +256,75 @@ bool ComputePairWeight(const Eigen::Vector3d &c0, const Eigen::Vector3d &c1,
             }
         }
 
-        if (sections.empty()) {
-            weight[i_t] = 1.;
-        } else {
-            double arc = remaining_arc(sections, 2.*M_PI);
-            weight[i_t] = arc / (2.*M_PI);
+        if (!use_persistence) {
+            if (sections.empty()) {
+                weight[i_t] = 1.;
+            } else {
+                double arc = remaining_arc(sections, 2.*M_PI);
+                weight[i_t] = arc / (2.*M_PI);
+            }
+            continue;
         }
+
+        // Expensive path: per-bin exponential persistence.  A bin not yet
+        // covered contributes 1 (untouched, still full source); a bin
+        // covered now for the first time is stamped with the current time
+        // and the occluding radius R2 at that instant; a previously touched
+        // bin contributes exp(-(t_now - t_touch)/tau), with
+        // tau = persistence_alpha * dt_wall(R2 at t_touch), or, with a
+        // --wall-radius file, persistence_alpha * (measured wall width at t_touch).
+        std::vector<std::pair<double,double>> merged;
+        if (!sections.empty()) merge_intervals(sections, 2.*M_PI, merged);
+        double t_now = setup.t[i_t];
+        double sum = 0.;
+        for (int kk = 0; kk < n_bins; ++kk) {
+            bool cov = !merged.empty() && is_covered(bin_theta[kk], merged, 2.*M_PI);
+            if (!cov) {
+                sum += 1.;
+                ever_uncovered[kk] = true;
+                continue;
+            }
+            if (!ever_uncovered[kk]) continue;   // never exposed -> stays 0
+            if (touched_at[kk] < 0.) {
+                touched_at[kk] = t_now;
+                touched_R2[kk] = R2;
+                if (!setup.wall_width.empty()) touched_width[kk] = setup.wall_width[i_t];
+            }
+            double tau;
+            // With a --wall-radius file: the measured wall width (R_out - R_in)
+            // at the moment this bin was covered; otherwise the textbook
+            // wall-crossing time dt_wall.
+            double tau_wall = setup.wall_width.empty()
+                ? dt_wall(touched_R2[kk], setup.rin_0, setup.rout_0)
+                : touched_width[kk];
+            if (setup.ring_amp > 0.) {
+                double rmid_0 = 0.5 * (setup.rin_0 + setup.rout_0);
+                double tau_ring = setup.ring_beta
+                    * gamma_local(touched_R2[kk], setup.rin_0, setup.rout_0, rmid_0)
+                    / setup.persistence_m_true;
+                double tau_drop = setup.persistence_alpha * tau_wall;
+                double dt_since = t_now - touched_at[kk];
+                sum += (1. - setup.ring_amp) * ((tau_drop > 0.) ? std::exp(-dt_since / tau_drop) : 0.)
+                     + setup.ring_amp * ((tau_ring > 0.) ? std::exp(-dt_since / tau_ring) : 0.);
+                continue;
+            }
+            if (setup.persistence_m_true > 0.) {
+                // Persistence lasts until whichever process takes longer: the
+                // wall's own geometric (Lorentz-CONTRACTED, shrinks with
+                // gamma) crossing time, or the field's time-DILATED intrinsic
+                // relaxation (grows with gamma) -- dominates at low gamma
+                // (matches the pure dt_wall model there) and at high gamma
+                // (boosts persistence where dt_wall alone falls off too fast).
+                double rmid_0 = 0.5 * (setup.rin_0 + setup.rout_0);
+                double tau_relax = gamma_local(touched_R2[kk], setup.rin_0, setup.rout_0, rmid_0)
+                    / setup.persistence_m_true;
+                tau = setup.persistence_alpha * std::max(tau_wall, tau_relax);
+            } else {
+                tau = setup.persistence_alpha * tau_wall;
+            }
+            sum += (tau > 0.) ? std::exp(-(t_now - touched_at[kk]) / tau) : 0.;
+        }
+        weight[i_t] = sum / n_bins;
     }
     return true;
 }
