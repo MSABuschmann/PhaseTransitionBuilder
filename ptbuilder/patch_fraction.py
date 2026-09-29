@@ -114,10 +114,28 @@ def pair_separation(gamma, rin_0, rout_0, rmid_0):
     return 2. * np.sqrt(sc2 + rmid_0**2)
 
 
-def refined_grid(times, t_end, refine=2):
-    """Weights grid truncated/extended to t_end, with refine-1 points inserted per interval."""
+def refined_grid(times, t_end, refine=2, extension_spacing=None):
+    """
+    Weights grid truncated or extended to t_end, with refine-1 points
+    inserted per interval. An extension past the last node continues at the
+    grid's own (uniform) spacing, or at extension_spacing, which is required
+    for a nonuniform grid; t_end itself is included exactly once.
+    """
     t = np.asarray(times, dtype=float)
-    t = np.r_[t[t < t_end], t_end]
+    if t_end > t[-1]:
+        if extension_spacing is None:
+            dt = np.diff(t)
+            if not np.allclose(dt, dt[0], rtol=1e-9, atol=0.):
+                raise ValueError("nonuniform weights grid: pass extension_spacing to extend it")
+            h = dt[0]
+        else:
+            h = float(extension_spacing)
+            if not h > 0:
+                raise ValueError("extension_spacing must be positive")
+        n = int(np.floor((t_end - t[-1]) / h))
+        t = np.r_[t, t[-1] + h * np.arange(1, n + 1)]
+    tol = 1e-9 * np.min(np.diff(t)) if len(t) > 1 else 0.
+    t = np.r_[t[t < t_end - tol], t_end]
     if refine > 1:
         frac = np.arange(refine) / refine
         t = np.r_[(t[:-1, None] + np.diff(t)[:, None] * frac).ravel(), t[-1]]
@@ -131,10 +149,15 @@ def damped_weights(weights, weights_times, gammas, profile, kernel, t_end=None, 
     weights: (n_pairs, n_t) from load_weights; gammas: their gamma_ij;
     profile: instanton (rin_0, rout_0, rmid_0). kernel: a response, or a
     load_gamma_response(...) result (picked per pair by its gamma_ij).
+    Extending past the weights file (t_end > last time) pads with zero
+    weights, allowed only when every pair's final weight is already zero.
     Returns (w_eff, times) on the
     (optionally refined, truncated at t_end) grid; the native weights are
     linearly interpolated onto it first, as in the handoff's pilot.
     """
+    if t_end is not None and t_end > weights_times[-1] and np.any(np.asarray(weights)[:, -1] > 0):
+        raise ValueError("cannot extend past the weights file with zero weights: some pairs are "
+                         "still active at its last time; recompute the weights further out")
     t = refined_grid(weights_times, weights_times[-1] if t_end is None else t_end, refine)
     w = np.array([np.interp(t, weights_times, row, left=0., right=0.) for row in weights])
     out = np.empty_like(w)

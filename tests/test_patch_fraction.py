@@ -81,6 +81,30 @@ class ReferenceTests(unittest.TestCase):
         with self.assertRaises(ValueError): effective_weights([0, 1], [0, np.nan], 1, None)
         with self.assertRaises(ValueError): effective_weights([0, 1], [0, 1], 0, None)
 
+    def test_refined_grid_extension(self):
+        from ptbuilder.patch_fraction import refined_grid
+        np.testing.assert_allclose(refined_grid([0, 1, 2], 10, 2), np.arange(0, 10.01, .5))
+        # endpoint between regular points: included exactly once
+        np.testing.assert_allclose(refined_grid([0, 1, 2], 3.3, 1), [0, 1, 2, 3, 3.3])
+        np.testing.assert_allclose(refined_grid([0, 1, 2], 3.3, 2), [0, .5, 1, 1.5, 2, 2.5, 3, 3.15, 3.3])
+        # truncation inside the original grid is unchanged
+        np.testing.assert_allclose(refined_grid([0, 1, 2, 3], 1.5, 2), [0, .5, 1, 1.25, 1.5])
+        np.testing.assert_allclose(refined_grid([0, 1, 2, 3], 3, 1), [0, 1, 2, 3])
+        # nonuniform grids need an explicit spacing
+        with self.assertRaises(ValueError): refined_grid([0, 1, 3], 5, 1)
+        np.testing.assert_allclose(refined_grid([0, 1, 3], 5, 1, extension_spacing=1), [0, 1, 3, 4, 5])
+
+    def test_extension_requires_zero_terminal_weights(self):
+        from ptbuilder.patch_fraction import damped_weights
+        from types import SimpleNamespace
+        prof = SimpleNamespace(rin_0=1., rout_0=2., rmid_0=1.5)
+        f = response([0, 1, 2], [1, .5, .25], alpha=1)
+        t = np.array([0., 1, 2])
+        with self.assertRaises(ValueError):
+            damped_weights(np.array([[0, 1, .5]]), t, [3.], prof, f, t_end=5.)
+        w, tg = damped_weights(np.array([[0, 1, 0.]]), t, [3.], prof, f, t_end=5.)
+        np.testing.assert_allclose(tg, [0, 1, 2, 3, 4, 5])
+
     def test_measured_data_contract(self):
         for lb in [.84, .069]:
             for geom in ["fixed_annulus", "fixed_rapidity"]:
