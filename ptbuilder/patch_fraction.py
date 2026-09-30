@@ -142,7 +142,8 @@ def refined_grid(times, t_end, refine=2, extension_spacing=None):
     return t
 
 
-def damped_weights(weights, weights_times, gammas, profile, kernel, t_end=None, refine=1):
+def damped_weights(weights, weights_times, gammas, profile, kernel, t_end=None, refine=1,
+                   extension_spacing=None):
     """
     Apply effective_weights to every pair of a weights file.
 
@@ -158,7 +159,8 @@ def damped_weights(weights, weights_times, gammas, profile, kernel, t_end=None, 
     if t_end is not None and t_end > weights_times[-1] and np.any(np.asarray(weights)[:, -1] > 0):
         raise ValueError("cannot extend past the weights file with zero weights: some pairs are "
                          "still active at its last time; recompute the weights further out")
-    t = refined_grid(weights_times, weights_times[-1] if t_end is None else t_end, refine)
+    t = refined_grid(weights_times, weights_times[-1] if t_end is None else t_end, refine,
+                     extension_spacing)
     w = np.array([np.interp(t, weights_times, row, left=0., right=0.) for row in weights])
     out = np.empty_like(w)
     for p, (row, g) in enumerate(zip(w, gammas)):
