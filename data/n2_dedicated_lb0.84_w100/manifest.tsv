@@ -1,0 +1,4 @@
+index	gamma_ij	n_t	setup	name
+0	4.00668295715	41	data/n2_dedicated_lb0.84_w100/setups/row_0000.h5	row_0000
+1	3.0059619357	45	data/n2_dedicated_lb0.84_w100/setups/row_0001.h5	row_0001
+2	2.00600056814	48	data/n2_dedicated_lb0.84_w100/setups/row_0002.h5	row_0002

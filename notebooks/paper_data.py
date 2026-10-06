@@ -6,8 +6,9 @@ file is missing (or rebuild=True). The notebook itself only loads and plots.
 
 Conventions (agreed for the paper):
   * lattice spectra: (A+B)/2 of sledgehamr's gw_spectra and gw_spec_u_times_k.
-  * surrogate: pair spectra from the high-resolution scans (wall_points=100;
-    lambda_bar = 0.84 / 0.069 for N_b=2,3; 0.844777 for the "0.845" N_b>3 runs),
+  * surrogate: pair spectra at wall_points=100 (notebook 30): N_b=2,3 from dedicated runs, one per lattice pair at its
+    exact gamma_ij (lambda_bar = 0.84 / 0.069); N_b>3 from gamma_*=1-6 scans with time_factor 2.5 (lambda_bar = 0.069,
+    and 0.844777 for the "0.845" runs),
     our BubbleMaster cutoff window, D^3.6 damping (weight_decay_handover.pdf,
     Sec. 3 'D', calibrated on our 1+1D runs, data/damping_D36_kernel.json).
   * lattice vs surrogate spectra are compared through the lattice's own shell
@@ -42,9 +43,10 @@ LB845 = 0.8447772491349482          # exact lambda_bar of the "0.845" runs
 KR_LO, KR_HI = 1.0, 100.0
 KR_IPR = 30.0          # upper edge of the N_b>3 integrated power (fig 5)
 
-SCANS = {0.84: "runtime_scan_lb0.84_gs1-5_kR1-100_nw32",
-         0.069: "runtime_scan_lb0.069_gs1-6_kR1-100_nw32_w100",
-         LB845: "runtime_scan_lb0.844777_gs1-5_kR1-100_nw32"}
+SCANS = {0.069: "runtime_scan_lb0.069_gs1-6_kR1-100_nw32",          # N_b > 3: wall_points 100, time_factor 2.5 (notebook 30)
+         LB845: "runtime_scan_lb0.844777_gs1-6_kR1-100_nw32"}
+N23_RUNS = {0.84: "n2_dedicated_lb0.84_w100",                      # N_b = 2, 3: one row per lattice pair at its exact gamma_ij,
+            0.069: "n2_dedicated_lb0.069_w100"}                     # with t_m as an output time (notebook 30)
 LB_TAG = {0.84: "0.84", 0.069: "0.069", LB845: "0.844777"}   # wall-radius table / kernel keys
 
 
@@ -179,25 +181,26 @@ def damp(w, t, gam, lb, t_end=None, spacing=None):
 
 # ----------------------------------------------------------------------------- scans
 _SCAN = {}
-def scan(lb):
-    """(interp_fn, gammas, k_out, time bounds) of the high-resolution scan for lambda_bar lb."""
-    if lb not in _SCAN:
-        sc = load_scan(DATA / SCANS[lb])
-        k_out = np.geomspace(sc.rows[0].wlist[0], max(r.wlist[-1] for r in sc.rows), 128)
+def scan(lb, n23=False):
+    """(interp_fn, gammas, k_out, time bounds) of the scan for lambda_bar lb: the dedicated N_b=2 runs if n23, else the N_b>3 scan."""
+    key = (lb, n23)
+    if key not in _SCAN:
+        sc = load_scan(DATA / (N23_RUNS if n23 else SCANS)[lb])
+        k_out = np.geomspace(min(r.wlist[0] for r in sc.rows), max(r.wlist[-1] for r in sc.rows), 128)
         f, g = build_runtime_scan_interpolator(sc, k_out)
-        _SCAN[lb] = (f, g, k_out, np.array([min(r.times[0] for r in sc.rows), sc.t_max]))
-    return _SCAN[lb]
+        _SCAN[key] = (f, g, k_out, np.array([min(r.times[0] for r in sc.rows), sc.t_max]))
+    return _SCAN[key]
 
 
-def surrogate_at(w, t, gam, lb, T):
-    f_i, g_s, k_out, tb = scan(lb)
+def surrogate_at(w, t, gam, lb, T, n23=False):
+    f_i, g_s, k_out, tb = scan(lb, n23)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         return k_out, sum(reconstruct_pair_spectrum(float(g), w[p], t, T, f_i, tb, g_s) for p, g in enumerate(gam))
 
 
-def surrogate_series(w, t, gam, lb, tq):
-    f_i, g_s, k_out, tb = scan(lb)
+def surrogate_series(w, t, gam, lb, tq, n23=False):
+    f_i, g_s, k_out, tb = scan(lb, n23)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         return k_out, sum(reconstruct_pair_spectrum_series(float(g), w[p], t, tq, f_i, tb, g_s) for p, g in enumerate(gam))
@@ -260,19 +263,19 @@ def build_n2():
         for (i, j), shd, wb in c["pairs"]:
             d = _pair_sep(c, i, j); t_m = float(_cutoff_times(d, 0, 1.)[2]); t_img = _image_contact(lb, c, i, j)
             w, _, _, gam = load_weights(DATA / f"weights_out_{wb}_rnum.h5", 500); t = np.linspace(1., c["t_w_end"], 500)
-            w, t = hold_extend(w, t, scan(lb)[3][1])
-            w, t = damp(w, t, gam, lb)              # isolated pair: constant weight, so the damping changes nothing
+            w, t = hold_extend(w, t, scan(lb, True)[3][1])
+            w, t = damp(w, t, gam, lb)              # no effect before image contact (the pair's weight is constant; image pairs collide later)
             sh = load_averaged(shd); times = np.array(sh.GetTimesOfGravitationalWaveSpectra())
             # Fig 1: lattice snapshot nearest t_m, surrogate at exactly that time
             idx = int(np.argmin(abs(times - t_m))); t_s = float(times[idx])
             k, y = lattice_snapshot(sh, idx, L); keff = np.r_[0., k * L / (2 * np.pi)]
             y_sh = to_chw(y, d, lb, L**3); n_modes = shell_mode_counts(len(k))[1:]
-            k_out, s = surrogate_at(w, t, gam, lb, t_s); y_rec = to_chw(s, d, lb, L**3)
+            k_out, s = surrogate_at(w, t, gam, lb, t_s, True); y_rec = to_chw(s, d, lb, L**3)
             mask, Yn = compare_shells(k_out * d, y_rec, d, L, keff)
             # Fig 2: I_K at every lattice snapshot before image contact
             tl = times[times < t_img]; n_hi = int(np.floor(KR_HI / d * L / (2 * np.pi)))
             I_lat = np.array([I_K_shells(np.r_[0., to_chw(lattice_snapshot(sh, q, L)[1], d, lb, L**3)], keff, n_hi) for q in range(len(tl))])
-            k_out, comb = surrogate_series(w, t, gam, lb, tl)
+            k_out, comb = surrogate_series(w, t, gam, lb, tl, True)
             I_red = I_K_series_surrogate(k_out, comb, d, lb, L, keff, n_hi)
             out[(lb, (i, j))] = dict(gamma=float(gam.min()), d=d, t_m=t_m, t_snap=t_s, t_img=t_img,
                                      kR_sh=k * d, y_sh=y_sh, yerr=y_sh * np.sqrt(2. / n_modes),
@@ -290,16 +293,20 @@ def build_n3():
         shd, wb = c["trio"]
         with h5py.File(DATA / f"weights_in_{wb}.h5") as f: t = f["t"][:]
         w, _, _, gam = load_weights(DATA / f"weights_out_{wb}_rnum.h5", len(t))
+        w_raw, t_raw = w, t
         w, t = damp(w, t, gam, lb)
         sh = load_averaged(shd); times = np.array(sh.GetTimesOfGravitationalWaveSpectra())
         idx = int(np.argmin(abs(times - t_m3))); t_s = float(times[idx])
         k, y = lattice_snapshot(sh, idx, L); keff = np.r_[0., k * L / (2 * np.pi)]
         y_sh = to_chw(y, R, lb, L**3); n_modes = shell_mode_counts(len(k))[1:]
-        k_out, s = surrogate_at(w, t, gam, lb, t_s); y_rec = to_chw(s, R, lb, L**3)
+        k_out, s = surrogate_at(w, t, gam, lb, t_s, True); y_rec = to_chw(s, R, lb, L**3)
         mask, Yn = compare_shells(k_out * R, y_rec, R, L, keff)
+        y_rec_raw = to_chw(surrogate_at(w_raw, t_raw, gam, lb, t_s, True)[1], R, lb, L**3)   # undamped
+        _, Yn_raw = compare_shells(k_out * R, y_rec_raw, R, L, keff)
         out[lb] = dict(R=R, t_m3=t_m3, t_snap=t_s, gammas=sorted(float(g) for g in gam[:3]),
                        kR_sh=k * R, y_sh=y_sh, yerr=y_sh * np.sqrt(2. / n_modes),
-                       kR_rec=k_out * R, y_rec=y_rec, shell_mask=mask, rec_shells=Yn)
+                       kR_rec=k_out * R, y_rec=y_rec, shell_mask=mask, rec_shells=Yn,
+                       y_rec_raw=y_rec_raw, rec_shells_raw=Yn_raw)
     return out
 
 
@@ -372,6 +379,7 @@ def build_nmany_one(r):
     w, t, g, t_ext = nmany_weights(r)
     t_coll_end = float(t[np.where(w.sum(axis=0) > 0.01)[0][-1]])
     wd, td = damp(w, t, g, lb, t_end=t_ext, spacing=(R / 150. if t_ext else None))
+    wr = np.array([np.interp(td, t, row, left=0., right=0.) for row in w])     # undamped, on the same grid
     sh = load_averaged(r["sh"]); times = np.array(sh.GetTimesOfGravitationalWaveSpectra())
     # Fig 4: late-time lattice band vs surrogate at min(weights end, last snapshot)
     T = min(float(td[-1]), float(times[-1]))
@@ -382,15 +390,19 @@ def build_nmany_one(r):
     norm = lambda y: to_chw(y, R, lb, L**3)
     k_out, s = surrogate_at(wd, td, g, lb, T); y_rec = norm(s)
     mask, Yn = compare_shells(k_out * R, y_rec, R, L, keff)
+    y_rec_raw = norm(surrogate_at(wr, td, g, lb, T)[1])
+    _, Yn_raw = compare_shells(k_out * R, y_rec_raw, R, L, keff)
     # Fig 5: I_K at every snapshot, shells with kR_* <= KR_IPR (excludes the lattice-only true-vacuum oscillation bump)
     n_hi = int(np.floor(KR_IPR / R * L / (2 * np.pi)))
     I_lat = np.array([I_K_shells(np.r_[0., np.interp(k_ref, *lattice_snapshot(sh, q, L))[:]], keff, n_hi) for q in range(len(times))])
     I_lat = norm(I_lat)
     k_out, comb = surrogate_series(wd, td, g, lb, times)
     I_red = I_K_series_surrogate(k_out, comb, R, lb, L, keff, n_hi)
+    I_red_raw = I_K_series_surrogate(k_out, surrogate_series(wr, td, g, lb, times)[1], R, lb, L, keff, n_hi)
     return dict(run=r, N_b=m["N_b"], L=L, R=R, gamma_star=m["gamma_star"], t_coll_end=t_coll_end, T_surr=T, t_band=(tband[0], tband[-1]),
                 kR_sh=k_ref * R, y_med=norm(med), y_lo=norm(lo), y_hi=norm(hi), kR_rec=k_out * R, y_rec=y_rec,
-                shell_mask=mask, rec_shells=Yn, t=times, I_lat=I_lat, I_red=I_red)
+                shell_mask=mask, rec_shells=Yn, t=times, I_lat=I_lat, I_red=I_red,
+                y_rec_raw=y_rec_raw, rec_shells_raw=Yn_raw, I_red_raw=I_red_raw)
 
 
 def build_nmany():
