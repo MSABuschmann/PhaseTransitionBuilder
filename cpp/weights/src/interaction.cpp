@@ -225,8 +225,6 @@ bool ComputePairWeight(const Eigen::Vector3d &c0, const Eigen::Vector3d &c1,
             : setup.R[i_t];
 
         for (int b = 0; b < setup.n_b; ++b) {
-            if (b == real_i || b == real_j)
-                continue;
             // Include the same 3x3x3 periodic images used by the reference
             // GetGhosts implementation.  Start around the image nearest to
             // the collision centre so this remains correct when cx itself is
@@ -241,6 +239,11 @@ bool ComputePairWeight(const Eigen::Vector3d &c0, const Eigen::Vector3d &c1,
                     for (int sz = -1; sz <= 1; ++sz) {
                         Eigen::Vector3d c2 = c_near + setup.L *
                             Eigen::Vector3d(sx, sy, sz);
+                        // skip only the two colliding copies themselves (as the
+                        // reference does); other periodic copies of i and j occlude
+                        if ((b == real_i && (c2 - c0).squaredNorm() < 1e-12) ||
+                            (b == real_j && (c2 - c1).squaredNorm() < 1e-12))
+                            continue;
                         Eigen::Vector3d dist = c2 - cx[i_t];
                         if (dist.squaredNorm() > R2*R2*4) continue;
 
