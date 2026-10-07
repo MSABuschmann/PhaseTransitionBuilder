@@ -52,3 +52,9 @@ redo.sh
 
 # macOS
 .DS_Store
+
+# Notebooks: only these are part of the repo
+notebooks/*.ipynb
+!notebooks/19_production_scan.ipynb
+!notebooks/29_paper_figures.ipynb
+!notebooks/30_longer_window_scans.ipynb
