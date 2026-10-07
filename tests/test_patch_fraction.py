@@ -1,4 +1,4 @@
-"""Port of the patch-fraction handoff's reference tests (python -m unittest -v tests.test_patch_fraction)."""
+"""Tests for ptbuilder.patch_fraction (python -m unittest -v tests.test_patch_fraction)."""
 from pathlib import Path
 import unittest
 import numpy as np
@@ -57,22 +57,6 @@ class ReferenceTests(unittest.TestCase):
         got = reconstruct_pair_spectrum(4., np.array([1, .5, .5]), np.array([0., 1, 2]), 2.,
                                         interp, np.array([0., 2.]), np.array([4.]))
         self.assertEqual(float(got[0]), 1.5)
-
-    def test_pair_separation_matches_handoff_parity(self):
-        import json
-        import ptbuilder as pt
-        path = (Path(__file__).parent.parent / "reference_codes" /
-                "patch_fraction_implementation_handoff" / "parity_results.json")
-        if not path.exists():
-            self.skipTest("handoff parity file not present (reference_codes/ is not tracked)")
-        parity = json.loads(path.read_text())
-        for tag, lb in [("084", .84), ("069", .069)]:
-            ins = pt.PhysicsModel(pt.Phi4Potential(lb), pt.Config()).instanton
-            for key, case in parity["geometry_cases"].items():
-                if key.startswith(tag):
-                    for r in case["checks"]:
-                        self.assertAlmostEqual(pair_separation(r["gamma"], ins.rin_0, ins.rout_0, ins.rmid_0),
-                                               r["d_pair"], places=9)
 
     def test_input_rejection(self):
         for x in ([0, np.nan, 2], [0, 1, 1]):

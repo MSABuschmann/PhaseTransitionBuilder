@@ -31,8 +31,6 @@ data/
 sledgehamr_runs/
 download/
 
-# Claude Code auto-memory
-.claude/
 
 # C++ compiled binaries (object files covered above)
 cpp/weights/weights

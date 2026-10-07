@@ -6,11 +6,9 @@ it enters reconstruct_pair_spectrum: whenever part of the weight is lost at
 time u, that part keeps contributing F((t - u)/d_pair)**alpha, where F is a
 measured patch-fraction table (gamma=4 calibration, one per lambda_bar).
 
-Ported from reference_codes/patch_fraction_implementation_handoff (see its
-patch_fraction_implementation.pdf for the prescription and its caveats):
-response/load_response/effective_weights are the handoff's portable
-reference, unchanged. The reconstruction itself (signed left-endpoint power
-increments) is the existing reconstruct_pair_spectrum.
+response/load_response/effective_weights implement the damping
+prescription. The reconstruction itself (signed left-endpoint power
+increments) is reconstruct_pair_spectrum.
 """
 import json
 from pathlib import Path
@@ -99,8 +97,8 @@ def effective_weights(weights, times, d_pair, kernel):
 def pair_separation(gamma, rin_0, rout_0, rmid_0):
     """
     Invert the weights binary's width-defined gamma_ij back to the pair
-    separation d (textbook radii, mid-radius collision convention), with the
-    round-trip check the handoff requires.
+    separation d (textbook radii, mid-radius collision convention), with a
+    round-trip check.
     """
     g = float(gamma)
     ric = 0.5 * (g * (rout_0 + rin_0) - (rout_0 - rin_0) / g)
@@ -154,7 +152,7 @@ def damped_weights(weights, weights_times, gammas, profile, kernel, t_end=None, 
     weights, allowed only when every pair's final weight is already zero.
     Returns (w_eff, times) on the
     (optionally refined, truncated at t_end) grid; the native weights are
-    linearly interpolated onto it first, as in the handoff's pilot.
+    linearly interpolated onto it first.
     """
     if t_end is not None and t_end > weights_times[-1] and np.any(np.asarray(weights)[:, -1] > 0):
         raise ValueError("cannot extend past the weights file with zero weights: some pairs are "
@@ -236,8 +234,8 @@ def calibrate_from_moments(path, d, n_ages=2049, t_end=None):
 def write_calibration(path, cases, convention):
     """
     cases: list of dicts with lambda_bar, gamma, d, s_c, delta_c, t0, ages,
-    K (dict geometry -> array). Written in the handoff's coordinate
-    (age/d, raw F, F(0)=1), one entry per (lambda_bar, gamma), with F capped at 1.
+    K (dict geometry -> array). Written in the coordinate age/d
+    (raw F, F(0)=1), one entry per (lambda_bar, gamma), with F capped at 1.
     """
     payload = dict(schema=2, coordinate="lab_age_over_d", gamma_policy="interpolate_F_in_gamma",
                    convention=convention, cases=[])
