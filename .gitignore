@@ -53,8 +53,9 @@ redo.sh
 # macOS
 .DS_Store
 
-# Notebooks: only these are part of the repo
+# Notebooks: only these are part of the repo (development notebooks live in notebooks/archive/, local only)
+notebooks/archive/
 notebooks/*.ipynb
-!notebooks/19_production_scan.ipynb
-!notebooks/29_paper_figures.ipynb
-!notebooks/30_longer_window_scans.ipynb
+!notebooks/00_production_scan.ipynb
+!notebooks/02_paper_figures.ipynb
+!notebooks/01_paper_runs.ipynb
