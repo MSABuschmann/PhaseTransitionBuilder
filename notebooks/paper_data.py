@@ -699,18 +699,19 @@ def build_weights_examples(many_ic, fam_case):
     w, _, _, g = load_weights(DATA / f"weights_out_{wb}_rnum.h5", len(t))
     R = float(np.mean([_pair_sep(c, i, j) for (i, j), _, _ in c["pairs"]]))
     wd, td = damp(w, t, g, 0.84)
-    out = dict(n3=dict(t=t, w=w, g=g, R=R, td=td, wd=wd))
+    f16 = lambda a: np.asarray(a, dtype=np.float16)       # weights are only drawn as lines: float16 keeps the cache small
+    out = dict(n3=dict(t=t, w=f16(w), g=g, R=R, td=td, wd=f16(wd)))
     r = [r for r in NMANY if r["ic"] == many_ic][0]
     w, t, g, t_ext = nmany_weights(r); R = run_meta(r)["R"]
     wd, td = damp(w, t, g, r["lb"], t_end=t_ext, spacing=(R / 150. if t_ext else None))
-    out["many"] = dict(t=t, w=w, g=g, R=R, td=td, wd=wd)
+    out["many"] = dict(t=t, w=f16(w), g=g, R=R, td=td, wd=f16(wd))
     lb, gs, nb, rz = fam_case; d = fam_dir(lb, gs, nb, rz)
     with h5py.File(d / "weights_input.h5") as f:
         t = f["t"][:]; R = float(f.attrs["R_star"])
     w, _, _, g = load_weights(d / "weights_output.h5", len(t))
     t_max = (_FAM_SCAN.get(lb) or _FAM_SCAN.setdefault(lb, load_scan(DATA / FAM_SCANS[lb]))).t_max
     wd, td = damp(w, t, g, lb, t_end=t_max, spacing=R / 150.)
-    out["fam"] = dict(t=t, w=w, g=g, R=R, td=td, wd=wd)
+    out["fam"] = dict(t=t, w=f16(w), g=g, R=R, td=td, wd=f16(wd))
     return out
 
 
