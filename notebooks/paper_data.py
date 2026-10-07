@@ -4,18 +4,17 @@ Every figure's numbers are built once by a `build_*` function and stored in
 data/paper_cache/<name>.pkl; `cached(name, builder)` only rebuilds when the
 file is missing (or rebuild=True). The notebook itself only loads and plots.
 
-Conventions (agreed for the paper):
+Conventions:
   * lattice spectra: (A+B)/2 of sledgehamr's gw_spectra and gw_spec_u_times_k.
   * surrogate: pair spectra at wall_points=100 (notebook 01_paper_runs): N_b=2,3 from dedicated runs, one per lattice pair at its
     exact gamma_ij (lambda_bar = 0.84 / 0.069); N_b>3 from gamma_*=1-6 scans with time_factor 2.5 (lambda_bar = 0.069,
     and 0.844777 for the "0.845" runs),
-    our BubbleMaster cutoff window, D^3.6 damping (weight_decay_handover.pdf,
-    Sec. 3 'D', calibrated on our 1+1D runs, data/damping_D36_kernel.json).
+    our BubbleMaster cutoff window, D^3.6 damping (calibrated on our 1+1D runs, data/damping_D36_kernel.json).
   * lattice vs surrogate spectra are compared through the lattice's own shell
     estimator (surrogate evaluated at the occupied lattice-mode radii, shell
     summed, complete shells only).
   * integrated power I_K = sum_n P_n dk/k_n over shells (the exact sum over lattice modes), lattice and
-    surrogate alike: kR_* <= 100 for N_b=2 (fig 2), kR_* <= 30 for N_b>3 (fig 5, excludes the true-vacuum oscillations).
+    surrogate alike: kR_* <= 100 for N_b=2, kR_* <= 30 for N_b>3 (excludes the true-vacuum oscillations).
   * normalization [H_* R_* Omega_vac]^-2 uses each run's exact lambda_bar.
 """
 from pathlib import Path
@@ -41,7 +40,7 @@ CACHE = DATA / "paper_cache"
 CACHE.mkdir(exist_ok=True)
 LB845 = 0.8447772491349482          # exact lambda_bar of the "0.845" runs
 KR_LO, KR_HI = 1.0, 100.0
-KR_IPR = 30.0          # upper edge of the N_b>3 integrated power (fig 5)
+KR_IPR = 30.0          # upper edge of the N_b>3 integrated power
 
 SCANS = {0.069: "runtime_scan_lb0.069_gs1-6_kR1-100_nw32",          # N_b > 3: wall_points 100, time_factor 2.5 (notebook 01_paper_runs)
          LB845: "runtime_scan_lb0.844777_gs1-6_kR1-100_nw32"}
@@ -140,7 +139,7 @@ def I_K_shells(y_n, keff, n_hi):
 
 # ----------------------------------------------------------------------------- damping kernel
 class D36Kernel:
-    """K = Dhat^3.6 (handover Sec. 3 'D') from the stored tables: monotone PCHIP in age,
+    """K = Dhat^3.6 from the stored tables: monotone PCHIP in age,
     power-law tail beyond each row, linear in ln Dhat between boosts, boosts clamped."""
     per_gamma = True
 
@@ -232,7 +231,7 @@ def I_K_series_surrogate(k_out, comb, R, lb, L, keff, n_hi):
     return np.array(out)
 
 
-# ----------------------------------------------------------------------------- N_b = 2 and 3 (figs 1-3)
+# ----------------------------------------------------------------------------- N_b = 2 and 3
 N23 = {0.84: dict(L=200., t_w_end=70., pos=[[72.25, 89.92, 100.], [127.8, 89.92, 100.], [108.7, 110.1, 100.]],
                   pairs=[((0, 1), "bubble_N3_234_0_1__nocutoff", "N3_084_pair_0_1"), ((0, 2), "bubble_N3_234_0_2__nocutoff", "N3_084_pair_0_2"),
                          ((1, 2), "bubble_N3_234_1_2__nocutoff", "N3_084_pair_1_2")],
@@ -256,7 +255,7 @@ def _image_contact(lb, c, i, j):
 
 
 def build_n2():
-    """Fig 1 (spectra at the lattice snapshot nearest t_m) and Fig 2 (I_K(t) until image contact) for each N_b=2 pair."""
+    """N_b=2 spectra at the lattice snapshot nearest t_m, and I_K(t) until image contact, for each pair."""
     out = {}
     for lb, c in N23.items():
         L = c["L"]
@@ -266,13 +265,13 @@ def build_n2():
             w, t = hold_extend(w, t, scan(lb, True)[3][1])
             w, t = damp(w, t, gam, lb)              # no effect before image contact (the pair's weight is constant; image pairs collide later)
             sh = load_averaged(shd); times = np.array(sh.GetTimesOfGravitationalWaveSpectra())
-            # Fig 1: lattice snapshot nearest t_m, surrogate at exactly that time
+            # spectra: lattice snapshot nearest t_m, surrogate at exactly that time
             idx = int(np.argmin(abs(times - t_m))); t_s = float(times[idx])
             k, y = lattice_snapshot(sh, idx, L); keff = np.r_[0., k * L / (2 * np.pi)]
             y_sh = to_chw(y, d, lb, L**3); n_modes = shell_mode_counts(len(k))[1:]
             k_out, s = surrogate_at(w, t, gam, lb, t_s, True); y_rec = to_chw(s, d, lb, L**3)
             mask, Yn = compare_shells(k_out * d, y_rec, d, L, keff)
-            # Fig 2: I_K at every lattice snapshot before image contact
+            # integrated power: I_K at every lattice snapshot before image contact
             tl = times[times < t_img]; n_hi = int(np.floor(KR_HI / d * L / (2 * np.pi)))
             I_lat = np.array([I_K_shells(np.r_[0., to_chw(lattice_snapshot(sh, q, L)[1], d, lb, L**3)], keff, n_hi) for q in range(len(tl))])
             k_out, comb = surrogate_series(w, t, gam, lb, tl, True)
@@ -285,7 +284,7 @@ def build_n2():
 
 
 def build_n3():
-    """Fig 3: three-bubble runs at the lattice snapshot nearest the latest pair t_m; damped surrogate."""
+    """N_b=3 spectra: three-bubble runs at the lattice snapshot nearest the latest pair t_m; damped surrogate."""
     out = {}
     for lb, c in N23.items():
         L = c["L"]; seps = [_pair_sep(c, i, j) for (i, j), _, _ in c["pairs"]]
@@ -310,7 +309,7 @@ def build_n3():
     return out
 
 
-# ----------------------------------------------------------------------------- N_b > 3 (figs 4-5)
+# ----------------------------------------------------------------------------- N_b > 3
 # panel = gamma_* column; every 0.845 run is rebuilt from its initial state with lambda_bar = 0.844777
 # kinematics and wall-radius table (new=True); the 0.069 runs keep their tracked weights inputs.
 NMANY = [
@@ -380,7 +379,7 @@ def build_nmany_one(r, central="median"):
     wd, td = damp(w, t, g, lb, t_end=t_ext, spacing=(R / 150. if t_ext else None))
     wr = np.array([np.interp(td, t, row, left=0., right=0.) for row in w])     # undamped, on the same grid
     sh = load_averaged(r["sh"]); times = np.array(sh.GetTimesOfGravitationalWaveSpectra())
-    # Fig 4: late-time lattice band vs surrogate at min(weights end, last snapshot)
+    # spectra: late-time lattice band vs surrogate at min(weights end, last snapshot)
     T = min(float(td[-1]), float(times[-1]))
     k_ref, med, lo, hi, last, tband = late_time_band(sh, times, t_coll_end, L)
     if central == "last":
@@ -393,7 +392,7 @@ def build_nmany_one(r, central="median"):
     mask, Yn = compare_shells(k_out * R, y_rec, R, L, keff)
     y_rec_raw = norm(surrogate_at(wr, td, g, lb, T)[1])
     _, Yn_raw = compare_shells(k_out * R, y_rec_raw, R, L, keff)
-    # Fig 5: I_K at every snapshot, shells with kR_* <= KR_IPR (excludes the lattice-only true-vacuum oscillation bump)
+    # integrated power: I_K at every snapshot, shells with kR_* <= KR_IPR (excludes the lattice-only true-vacuum oscillation bump)
     n_hi = int(np.floor(KR_IPR / R * L / (2 * np.pi)))
     I_lat = np.array([I_K_shells(np.r_[0., np.interp(k_ref, *lattice_snapshot(sh, q, L))[:]], keff, n_hi) for q in range(len(times))])
     I_lat = norm(I_lat)
@@ -410,7 +409,7 @@ def build_nmany(central="median"):
     return {(r["ic"]): build_nmany_one(r, central) for r in NMANY}
 
 
-# ----------------------------------------------------------------------------- gamma_* and N_b families (figs 6-8)
+# ----------------------------------------------------------------------------- gamma_* and N_b families
 # gamma_* family: N_b = FAM_NB, gamma_* in FAM_GS; N_b family: gamma_* = NB_GS, N_b in NB_LIST; N_REAL placements each.
 # Weights: cpp/weights with the measured wall-radius table (as every other run here), from t = 0 to 5% past the
 # box-filling time. Surrogate: the gamma_* = 1-16 scans (wall_points 50, time_factor 2.5); damped weights extended to
@@ -422,7 +421,7 @@ FAM_GS = list(range(2, 17))
 FAM_NB = 128
 NB_GS = 16
 NB_LIST = [4, 8, 16, 32, 64, 128, 256, 512]
-DEC_NB = 512                          # fig 8: spectral decomposition of the (NB_GS, DEC_NB) case
+DEC_NB = 512                          # power-origin figure: spectral decomposition of the (NB_GS, DEC_NB) case
 N_REAL = 16
 FAM_STEPS_PER_RSTAR = 450             # weights time resolution (as the N_b > 3 runs)
 FAM_ROOT = DATA / "family_weights"
@@ -521,7 +520,7 @@ def _fam_task(args):
     wd, td = damp(w, t, g, lb, t_end=tb[1], spacing=R / 150.)
     wr = np.array([np.interp(td, t, row, left=0., right=0.) for row in w])
     out = dict(R=R, L=L, undamped=sum(_accumulate(f, tb, gg, row, td) for gg, row in zip(g, wr)))
-    if gs == NB_GS and nb == DEC_NB:              # fig 8: per time step and per gamma_ij bin
+    if gs == NB_GS and nb == DEC_NB:              # power-origin figure: per time step and per gamma_ij bin
         edges_g = np.arange(sg.min() - dg / 2, 3.5 * gs, dg)
         h_t = np.zeros((len(td) - 1, N_PLOT)); h_g = np.zeros((len(edges_g) - 1, N_PLOT)); spec = np.zeros(N_PLOT)
         for gg, row in zip(g, wd):
@@ -535,7 +534,7 @@ def _fam_task(args):
         out.update(damped=spec, dec=dict(h_t=H_t, h_g=h_g, t=edges_t, edges_g=edges_g))
     else:
         out["damped"] = sum(_accumulate(f, tb, gg, row, td) for gg, row in zip(g, wd))
-    if nb == FAM_NB:                               # fig 7: pair gamma_ij, integrated weight, last collision time
+    if nb == FAM_NB:                               # weight-distribution figure: pair gamma_ij, integrated weight, last collision time
         h = dict(gamma=g)
         for name, ww, tt, thr in (("raw", w, t, 0.), ("damp", wd, td, 0.01)):
             on = ww > thr * ww.max(axis=1, keepdims=True) if thr > 0 else ww > 0
@@ -600,7 +599,7 @@ def fam_available():
 
 
 def load_families(rebuild=False):
-    """Fig 6: gs[(lb, gamma_*)] = (R_*, L, {'damped','undamped': (N_REAL, N_PLOT)}), nb[(lb, N_b, r)] = (L, {...})."""
+    """Predictions figure: gs[(lb, gamma_*)] = (R_*, L, {'damped','undamped': (N_REAL, N_PLOT)}), nb[(lb, N_b, r)] = (L, {...})."""
     gs, nb = {}, {}
     for lb in fam_available():
         F = family(lb, rebuild)
@@ -609,19 +608,19 @@ def load_families(rebuild=False):
 
 
 def load_weight_hists(rebuild=False):
-    """Fig 7: {(lb, gamma_*): pooled pair gamma_ij, integrated weight, last collision time (raw and damped)}."""
+    """Weight-distribution figure: {(lb, gamma_*): pooled pair gamma_ij, integrated weight, last collision time (raw and damped)}."""
     return {(lb, gs): h for lb in fam_available() for gs, h in family(lb, rebuild)["hist"].items()}
 
 
 def load_decomposition(rebuild=False):
-    """Fig 8: {lb: per-time-step and per-gamma_ij power of the (NB_GS, DEC_NB) case, summed over realizations}."""
+    """Power-origin figure: {lb: per-time-step and per-gamma_ij power of the (NB_GS, DEC_NB) case, summed over realizations}."""
     return {lb: family(lb, rebuild)["dec"] for lb in fam_available()}
 
 
-# ----------------------------------------------------------------------------- per-pair spectral power (fig 7, power-weighted)
+# ----------------------------------------------------------------------------- per-pair spectral power (power-weighted weight distributions)
 def _pair_power_task(args):
     """Damped surrogate power of every pair of one gamma_*-family realization: integrated over ln k (kR_* = 1-100)
-    and at the peak of the realization's summed spectrum. Same pair order as the weights file (and the fig 7 hist)."""
+    and at the peak of the realization's summed spectrum. Same pair order as the weights file (and the weight-distribution histograms)."""
     lb, gs, nb, rz = args
     part = CACHE / "fam_pairpow" / f"lb{LB_TAG[lb]}" / f"gs{gs:02d}_nb{nb:04d}_r{rz:02d}.pkl"
     if part.exists():
