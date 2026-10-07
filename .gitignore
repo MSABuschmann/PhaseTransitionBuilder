@@ -57,3 +57,8 @@ notebooks/*.ipynb
 !notebooks/00_production_scan.ipynb
 !notebooks/02_paper_figures.ipynb
 !notebooks/01_paper_runs.ipynb
+
+# Plots: only the paper figures are part of the repo
+notebooks/plots/*
+!notebooks/plots/paper/
+notebooks/plots/paper/.DS_Store
