@@ -1,4 +1,4 @@
-"""Data for the paper figures (notebook 29_paper_figures.ipynb).
+"""Data for the paper figures (notebook 02_paper_figures.ipynb).
 
 Every figure's numbers are built once by a `build_*` function and stored in
 data/paper_cache/<name>.pkl; `cached(name, builder)` only rebuilds when the
@@ -6,7 +6,7 @@ file is missing (or rebuild=True). The notebook itself only loads and plots.
 
 Conventions (agreed for the paper):
   * lattice spectra: (A+B)/2 of sledgehamr's gw_spectra and gw_spec_u_times_k.
-  * surrogate: pair spectra at wall_points=100 (notebook 30): N_b=2,3 from dedicated runs, one per lattice pair at its
+  * surrogate: pair spectra at wall_points=100 (notebook 01_paper_runs): N_b=2,3 from dedicated runs, one per lattice pair at its
     exact gamma_ij (lambda_bar = 0.84 / 0.069); N_b>3 from gamma_*=1-6 scans with time_factor 2.5 (lambda_bar = 0.069,
     and 0.844777 for the "0.845" runs),
     our BubbleMaster cutoff window, D^3.6 damping (weight_decay_handover.pdf,
@@ -43,10 +43,10 @@ LB845 = 0.8447772491349482          # exact lambda_bar of the "0.845" runs
 KR_LO, KR_HI = 1.0, 100.0
 KR_IPR = 30.0          # upper edge of the N_b>3 integrated power (fig 5)
 
-SCANS = {0.069: "runtime_scan_lb0.069_gs1-6_kR1-100_nw32",          # N_b > 3: wall_points 100, time_factor 2.5 (notebook 30)
+SCANS = {0.069: "runtime_scan_lb0.069_gs1-6_kR1-100_nw32",          # N_b > 3: wall_points 100, time_factor 2.5 (notebook 01_paper_runs)
          LB845: "runtime_scan_lb0.844777_gs1-6_kR1-100_nw32"}
 N23_RUNS = {0.84: "n2_dedicated_lb0.84_w100",                      # N_b = 2, 3: one row per lattice pair at its exact gamma_ij,
-            0.069: "n2_dedicated_lb0.069_w100"}                     # with t_m as an output time (notebook 30)
+            0.069: "n2_dedicated_lb0.069_w100"}                     # with t_m as an output time (notebook 01_paper_runs)
 LB_TAG = {0.84: "0.84", 0.069: "0.069", LB845: "0.844777"}   # wall-radius table / kernel keys
 
 
@@ -314,7 +314,7 @@ def build_n3():
 # panel = gamma_* column; every 0.845 run is rebuilt from its initial state with lambda_bar = 0.844777
 # kinematics and wall-radius table (new=True); the 0.069 runs keep their tracked weights inputs.
 NMANY = [
-    dict(lb=LB845, ic="Cutting_lb0.845_N64_g3.94", sh="Cutting_lb0.84_N64_g3.94_long", panel=4, col="C0"),
+    dict(lb=LB845, ic="Cutting_lb0.845_N29_L175.53", sh="Cutting_lb0.845_N29_L175.53", panel=4, col="C0"),   # same dx as the gamma_*=5 run
     dict(lb=LB845, ic="Cutting_lb0.845_N512_g4.00", sh="Cutting_lb0.84_N512_g4.00", panel=4, col="tab:brown"),
     dict(lb=LB845, ic="Cutting_lb0.845_N15_L176.15", sh="Cutting_lb0.845_N15_L176.15", panel=5, col="C0"),
     dict(lb=LB845, ic="Cutting_lb0.845_N15_L211.4", sh="Cutting_lb0.845_N15_L211.4", panel=6, col="C0"),
@@ -327,11 +327,9 @@ NMANY = [
 
 def _covering_radius(P, L):
     from scipy.spatial import Voronoi, cKDTree
-    m = 0.35 * L; imgs = []
-    for dx in (-1, 0, 1):
-        for dy in (-1, 0, 1):
-            for dz in (-1, 0, 1):
-                Q = P + L * np.array([dx, dy, dz]); imgs.append(Q[np.all((Q > -m) & (Q < L + m), axis=1)])
+    # all 26 neighbouring periodic copies: with only a few bubbles per box, copies further than a fraction of L
+    # away still bound the Voronoi cells inside the box
+    imgs = [P + L * np.array([dx, dy, dz]) for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)]
     V = Voronoi(np.vstack(imgs)).vertices; V = V[np.all((V >= 0) & (V < L), axis=1)]
     return cKDTree(P, boxsize=L).query(V)[0].max()
 
@@ -367,14 +365,15 @@ def nmany_weights(r):
 
 
 def late_time_band(out, times, t_from, L):
-    """Median / min / max over snapshots t >= t_from (raw units, interpolated onto the last snapshot's k)."""
+    """Median / min / max / last over snapshots t >= t_from (raw units, interpolated onto the last snapshot's k)."""
     late = np.where(times >= t_from)[0]
     k_ref, _ = lattice_snapshot(out, late[-1], L)
     S = np.array([np.interp(k_ref, *lattice_snapshot(out, q, L), left=np.nan, right=np.nan) for q in late])
-    return k_ref, np.nanmedian(S, axis=0), np.nanmin(S, axis=0), np.nanmax(S, axis=0), times[late]
+    return k_ref, np.nanmedian(S, axis=0), np.nanmin(S, axis=0), np.nanmax(S, axis=0), S[-1], times[late]
 
 
-def build_nmany_one(r):
+def build_nmany_one(r, central="median"):
+    """central: lattice central value, "median" over the late-time window or the "last" snapshot (band = window min/max either way)."""
     m = run_meta(r); R, L, lb = m["R"], m["L"], r["lb"]
     w, t, g, t_ext = nmany_weights(r)
     t_coll_end = float(t[np.where(w.sum(axis=0) > 0.01)[0][-1]])
@@ -383,7 +382,9 @@ def build_nmany_one(r):
     sh = load_averaged(r["sh"]); times = np.array(sh.GetTimesOfGravitationalWaveSpectra())
     # Fig 4: late-time lattice band vs surrogate at min(weights end, last snapshot)
     T = min(float(td[-1]), float(times[-1]))
-    k_ref, med, lo, hi, tband = late_time_band(sh, times, t_coll_end, L)
+    k_ref, med, lo, hi, last, tband = late_time_band(sh, times, t_coll_end, L)
+    if central == "last":
+        med = last                                # stored as y_med below
     keff = np.r_[0., k_ref * L / (2 * np.pi)]; n_modes = shell_mode_counts(len(k_ref))[1:]
     sig = med * np.sqrt(2. / n_modes)
     lo = med - np.sqrt((med - lo) ** 2 + sig ** 2); hi = med + np.sqrt((hi - med) ** 2 + sig ** 2)
@@ -399,117 +400,321 @@ def build_nmany_one(r):
     k_out, comb = surrogate_series(wd, td, g, lb, times)
     I_red = I_K_series_surrogate(k_out, comb, R, lb, L, keff, n_hi)
     I_red_raw = I_K_series_surrogate(k_out, surrogate_series(wr, td, g, lb, times)[1], R, lb, L, keff, n_hi)
-    return dict(run=r, N_b=m["N_b"], L=L, R=R, gamma_star=m["gamma_star"], t_coll_end=t_coll_end, T_surr=T, t_band=(tband[0], tband[-1]),
+    return dict(run=r, central=central, N_b=m["N_b"], L=L, R=R, gamma_star=m["gamma_star"], t_coll_end=t_coll_end, T_surr=T, t_band=(tband[0], tband[-1]),
                 kR_sh=k_ref * R, y_med=norm(med), y_lo=norm(lo), y_hi=norm(hi), kR_rec=k_out * R, y_rec=y_rec,
                 shell_mask=mask, rec_shells=Yn, t=times, I_lat=I_lat, I_red=I_red,
                 y_rec_raw=y_rec_raw, rec_shells_raw=Yn_raw, I_red_raw=I_red_raw)
 
 
-def build_nmany():
-    return {(r["ic"]): build_nmany_one(r) for r in NMANY}
+def build_nmany(central="median"):
+    return {(r["ic"]): build_nmany_one(r, central) for r in NMANY}
 
 
-# ----------------------------------------------------------------------------- gamma_* and N_b families (fig 6)
-def rho_chw(k, dE, R, lb, V):
-    return to_chw(dE, R, lb, V)
+# ----------------------------------------------------------------------------- gamma_* and N_b families (figs 6-8)
+# gamma_* family: N_b = FAM_NB, gamma_* in FAM_GS; N_b family: gamma_* = NB_GS, N_b in NB_LIST; N_REAL placements each.
+# Weights: cpp/weights with the measured wall-radius table (as every other run here), from t = 0 to 5% past the
+# box-filling time. Surrogate: the gamma_* = 1-16 scans (wall_points 50, time_factor 2.5); damped weights extended to
+# the scan's T_MAX. One cache per lambda_bar (fam_lb<tag>.pkl), built only once that lambda_bar's scan is complete.
+FAM_SCANS = {LB845: "runtime_scan_lb0.844777_w50_tf2.5_gs1-16_kR1-100_nw32",
+             0.069: "runtime_scan_lb0.069_w50_tf2.5_gs1-16_kR1-100_nw32"}
+FAM_LBS = [LB845, 0.069]
+FAM_GS = list(range(2, 17))
+FAM_NB = 128
+NB_GS = 16
+NB_LIST = [4, 8, 16, 32, 64, 128, 256, 512]
+DEC_NB = 512                          # fig 8: spectral decomposition of the (NB_GS, DEC_NB) case
+N_REAL = 16
+FAM_STEPS_PER_RSTAR = 450             # weights time resolution (as the N_b > 3 runs)
+FAM_ROOT = DATA / "family_weights"
+FAM_SEED = 160016
+N_PLOT, X_PLOT = 200, np.geomspace(1., 100., 200)
+GAMMA_STARS = FAM_GS
 
 
-def load_families():
-    """The cached damped/undamped reconstructions of notebooks 20 and 23 (see data/*D36_and_undamped*.pkl)."""
-    gs = pickle.load(open(DATA / "gamma_star_N128_ens16_D36_and_undamped_reconstructed.pkl", "rb"))
-    nb = pickle.load(open(DATA / "n_b_family_gstar20_ens16_D36_and_undamped_reconstructed.pkl", "rb"))
+def fam_rstar(lb, gs):
+    from ptbuilder.weight_scan_diagnostics import characteristic_scale
+    return characteristic_scale(load_kinematics(DATA / f"phi4_lambda_bar{LB_TAG[lb]}" / "instanton.h5"), float(gs))[1]
+
+
+def fam_cases(lb):
+    """(gamma_*, N_b, realization) of both families; the (NB_GS, FAM_NB) case is shared."""
+    pairs = sorted({(gs, FAM_NB) for gs in FAM_GS} | {(NB_GS, nb) for nb in NB_LIST})
+    return [(gs, nb, rz) for gs, nb in pairs for rz in range(N_REAL)]
+
+
+def fam_dir(lb, gs, nb, rz):
+    return FAM_ROOT / f"lb{LB_TAG[lb]}" / f"gs{gs:02d}_nb{nb:04d}" / f"r{rz:02d}"
+
+
+def _fam_weights_task(args):
+    from ptbuilder.analysis import write_weights_input
+    from ptbuilder.weight_scan_diagnostics import place_simultaneous_bubbles
+    lb, gs, nb, rz = args
+    d = fam_dir(lb, gs, nb, rz); win, wout = d / "weights_input.h5", d / "weights_output.h5"
+    if wout.exists():
+        return
+    d.mkdir(parents=True, exist_ok=True)
+    kin = load_kinematics(DATA / f"phi4_lambda_bar{LB_TAG[lb]}" / "instanton.h5")
+    R = fam_rstar(lb, gs); L = R * nb ** (1 / 3)
+    seed = int(FAM_SEED + gs * 1_000_003 + nb * 10_007 + rz * 100_000_003)
+    P = place_simultaneous_bubbles(nb, L, seed, min_separation=2.0 * kin.profile.rmid_0)
+    wall = DATA / f"wall_radius/lb{LB_TAG[lb]}.h5"
+    with h5py.File(wall) as tab:
+        s, Rm = tab["s"][:], tab["R_mid"][:]
+    t_end = 1.05 * float(np.interp(_covering_radius(P, L), Rm, s))
+    if t_end > s[-1]:
+        raise RuntimeError(f"lb={lb} gamma*={gs} N_b={nb} r{rz}: box fills at t={t_end/1.05:.1f}, past the wall-radius table (s<={s[-1]:.1f})")
+    t = np.linspace(0., t_end, int(np.ceil(t_end / (R / FAM_STEPS_PER_RSTAR))) + 1)
+    write_weights_input(win, P, t, kin, L, collision_radius="mid")
+    with h5py.File(win, "a") as f:
+        f.attrs.update(dict(gamma_star=float(gs), R_star=R, N_b=nb, placement_seed=seed, realization=rz))
+    subprocess.run([str(ROOT / "cpp/weights/weights"), str(win), str(wout), "--wall-radius", str(wall)],
+                   check=True, capture_output=True, env=os.environ | {"OMP_NUM_THREADS": "1"})
+
+
+def build_family_weights(lb, workers=8):
+    """Write and run every family weights input for lambda_bar lb (skips cases already done)."""
+    from concurrent.futures import ThreadPoolExecutor
+    cases = [(lb, gs, nb, rz) for gs, nb, rz in sorted(fam_cases(lb), key=lambda c: -c[1] * c[0] ** 3)]
+    with ThreadPoolExecutor(workers) as pool:
+        list(pool.map(_fam_weights_task, cases))
+
+
+_FI = {}
+def _fam_interp(lb, gs):
+    """Scan interpolator on k = X_PLOT / R_*(gamma_*) (one per worker and (lb, gamma_*))."""
+    if (lb, gs) not in _FI:
+        sc = _FAM_SCAN.get(lb) or _FAM_SCAN.setdefault(lb, load_scan(DATA / FAM_SCANS[lb]))
+        f, g = build_runtime_scan_interpolator(sc, X_PLOT / fam_rstar(lb, gs))
+        _FI[(lb, gs)] = (f, g, np.array([min(r.times[0] for r in sc.rows), sc.t_max]), float(np.diff(g).mean()))
+    return _FI[(lb, gs)]
+_FAM_SCAN = {}
+
+
+def _accumulate(f, tb, g_ij, w_row, t, h_t=None, start=None):
+    """One pair: sum_i w(t_i) [S(g, t_{i+1}) - S(g, t_i)] over t in the scan's range (reconstruct_pair_spectrum's
+    sum, restricted to the pair's nonzero window); optionally adds each step's contribution into h_t[step]."""
+    nz = np.where(w_row > 0)[0]
+    if len(nz) == 0:
+        return np.zeros(N_PLOT)
+    lo, hi = nz[0], min(nz[-1] + 2, len(t)); t_hi = min(t[-1], tb[1])
+    tw, ww = t[lo:hi], w_row[lo:hi]; m = (tw >= tb[0]) & (tw <= t_hi)
+    tc, wc = tw[m], ww[m]; i0 = lo + (int(np.argmax(m)) if m.any() else 0)
+    app = len(tc) == 0 or tc[-1] < t_hi
+    if app:
+        tc = np.append(tc, t_hi); wc = np.append(wc, np.interp(t_hi, t, w_row))
+    if len(tc) < 2:
+        return np.zeros(N_PLOT)
+    sp = f(np.column_stack([np.full(len(tc), float(g_ij)), tc])); wt = wc[:-1, None] * np.diff(sp, axis=0)
+    if h_t is not None:
+        n = len(wt) - 1 if app else len(wt); np.add.at(h_t, np.arange(i0, i0 + n), wt[:n])
+    return wt.sum(axis=0)
+
+
+def _fam_task(args):
+    lb, gs, nb, rz = args
+    f, sg, tb, dg = _fam_interp(lb, gs)
+    d = fam_dir(lb, gs, nb, rz)
+    with h5py.File(d / "weights_input.h5") as fh:
+        t = fh["t"][:]; R = float(fh.attrs["R_star"]); L = float(fh.attrs["L"])
+    w, _, _, g = load_weights(d / "weights_output.h5", len(t))
+    wd, td = damp(w, t, g, lb, t_end=tb[1], spacing=R / 150.)
+    wr = np.array([np.interp(td, t, row, left=0., right=0.) for row in w])
+    out = dict(R=R, L=L, undamped=sum(_accumulate(f, tb, gg, row, td) for gg, row in zip(g, wr)))
+    if gs == NB_GS and nb == DEC_NB:              # fig 8: per time step and per gamma_ij bin
+        edges_g = np.arange(sg.min() - dg / 2, 3.5 * gs, dg)
+        h_t = np.zeros((len(td) - 1, N_PLOT)); h_g = np.zeros((len(edges_g) - 1, N_PLOT)); spec = np.zeros(N_PLOT)
+        for gg, row in zip(g, wd):
+            c = _accumulate(f, tb, gg, row, td, h_t); spec += c
+            b = int(np.digitize([gg], edges_g)[0]) - 1
+            if 0 <= b < len(h_g): h_g[b] += c
+        # common time bins (width R_*/150 up to the scan's T_MAX) so the realizations can be summed
+        edges_t = np.linspace(0., tb[1], int(np.ceil(tb[1] / (R / 150.))) + 1)
+        H_t = np.zeros((len(edges_t) - 1, N_PLOT))
+        np.add.at(H_t, np.clip(np.digitize(0.5 * (td[:-1] + td[1:]), edges_t) - 1, 0, len(edges_t) - 2), h_t)
+        out.update(damped=spec, dec=dict(h_t=H_t, h_g=h_g, t=edges_t, edges_g=edges_g))
+    else:
+        out["damped"] = sum(_accumulate(f, tb, gg, row, td) for gg, row in zip(g, wd))
+    if nb == FAM_NB:                               # fig 7: pair gamma_ij, integrated weight, last collision time
+        h = dict(gamma=g)
+        for name, ww, tt, thr in (("raw", w, t, 0.), ("damp", wd, td, 0.01)):
+            on = ww > thr * ww.max(axis=1, keepdims=True) if thr > 0 else ww > 0
+            h[f"W_{name}"] = np.trapz(ww, tt, axis=1)
+            h[f"tmax_{name}"] = np.where(on.any(axis=1), tt[len(tt) - 1 - np.argmax(on[:, ::-1], axis=1)], np.nan) / R
+        out["hist"] = h
+    return (gs, nb, rz), out
+
+
+def fam_scan_complete(lb):
+    """True once every row of lb's family scan has all its output times."""
+    root = DATA / FAM_SCANS[lb]
+    if not (root / "setups").exists():
+        return False
+    for s in (root / "setups").glob("*.h5"):
+        with h5py.File(s) as fh:
+            n_t = len(fh["times"])
+        if len(list((root / "gpu" / s.stem).glob("result_*.h5"))) < n_t:
+            return False
+    return True
+
+
+def _fam_task_saved(args):
+    """_fam_task with its result stored per case (CACHE/fam_parts/...), so an interrupted build resumes."""
+    lb, gs, nb, rz = args
+    part = CACHE / "fam_parts" / f"lb{LB_TAG[lb]}" / f"gs{gs:02d}_nb{nb:04d}_r{rz:02d}.pkl"
+    if part.exists():
+        return (gs, nb, rz), pickle.load(open(part, "rb"))
+    key, out = _fam_task(args)
+    part.parent.mkdir(parents=True, exist_ok=True); pickle.dump(out, open(part, "wb"))
+    return key, out
+
+
+def build_family(lb, workers=8):
+    from multiprocessing import Pool
+    build_family_weights(lb, workers)
+    res = {}
+    with Pool(workers) as pool:
+        for key, out in pool.imap_unordered(_fam_task_saved, [(lb, *c) for c in sorted(fam_cases(lb), key=lambda c: -c[1])]):
+            res[key] = out
+    gsf = {gs: (res[(gs, FAM_NB, 0)]["R"], res[(gs, FAM_NB, 0)]["L"],
+                {k: np.array([res[(gs, FAM_NB, rz)][k] for rz in range(N_REAL)]) for k in ("damped", "undamped")})
+           for gs in FAM_GS}
+    nbf = {(nb, rz): (res[(NB_GS, nb, rz)]["L"], {k: res[(NB_GS, nb, rz)][k] for k in ("damped", "undamped")})
+           for nb in NB_LIST for rz in range(N_REAL)}
+    hist = {gs: {k: np.concatenate([res[(gs, FAM_NB, rz)]["hist"][k] for rz in range(N_REAL)])
+                 for k in res[(gs, FAM_NB, 0)]["hist"]} | dict(R=res[(gs, FAM_NB, 0)]["R"]) for gs in FAM_GS}
+    decs = [res[(NB_GS, DEC_NB, rz)] for rz in range(N_REAL)]
+    dec = dict(h_t=sum(x["dec"]["h_t"] for x in decs), h_g=sum(x["dec"]["h_g"] for x in decs),
+               t=decs[0]["dec"]["t"], edges_g=decs[0]["dec"]["edges_g"], spec=np.array([x["damped"] for x in decs]),
+               R=decs[0]["R"], L=decs[0]["L"], n_real=N_REAL, gamma_star=NB_GS)
+    return dict(gs=gsf, nb=nbf, hist=hist, dec=dec, R_nb=fam_rstar(lb, NB_GS))
+
+
+def family(lb, rebuild=False):
+    return cached(f"fam_lb{LB_TAG[lb]}", lambda: build_family(lb), rebuild)
+
+
+def fam_available():
+    """lambda_bar values whose family cache exists or whose scan is complete (in FAM_LBS order)."""
+    return [lb for lb in FAM_LBS if (CACHE / f"fam_lb{LB_TAG[lb]}.pkl").exists() or fam_scan_complete(lb)]
+
+
+def load_families(rebuild=False):
+    """Fig 6: gs[(lb, gamma_*)] = (R_*, L, {'damped','undamped': (N_REAL, N_PLOT)}), nb[(lb, N_b, r)] = (L, {...})."""
+    gs, nb = {}, {}
+    for lb in fam_available():
+        F = family(lb, rebuild)
+        gs |= {(lb, k): v for k, v in F["gs"].items()}; nb |= {(lb, *k): v for k, v in F["nb"].items()}
     return gs, nb
 
 
-# ----------------------------------------------------------------------------- weight histograms (fig 7)
-FAMILY_ROOT = {0.84: DATA / "gamma_star_weights_lb0p84_N128_ens16", 0.069: DATA / "gamma_star_weights_lb0p069_N128_ens16"}
-GAMMA_STARS = list(range(2, 21))
+def load_weight_hists(rebuild=False):
+    """Fig 7: {(lb, gamma_*): pooled pair gamma_ij, integrated weight, last collision time (raw and damped)}."""
+    return {(lb, gs): h for lb in fam_available() for gs, h in family(lb, rebuild)["hist"].items()}
 
 
-def _hist_task(args):
-    """Per (lambda_bar, gamma_*): pair gamma_ij, integrated weight and last collision time, raw and D^3.6-damped,
-    pooled over the 16 realizations. Damped 'last time' = last time the pair's damped weight is >= 1% of its maximum
-    (damped weights never return exactly to zero)."""
-    lb, gs = args
-    gdir = FAMILY_ROOT[lb] / f"gamma_star_{gs:03d}"
-    with h5py.File(gdir / "realization_00" / "weights_input.h5") as f: R = float(f.attrs["R_star"])
-    rec = {k: [] for k in ("gamma", "W_raw", "tmax_raw", "W_damp", "tmax_damp")}
-    for rz in range(16):
-        rdir = gdir / f"realization_{rz:02d}"
-        with h5py.File(rdir / "weights_input.h5") as f: t = f["t"][:]
-        w, _, _, g = load_weights(rdir / "weights_output.h5", len(t))
-        wd, _ = damp(w, t, g, lb)
-        for name, ww, thr in (("raw", w, 0.), ("damp", wd, 0.01)):
-            on = ww > thr * ww.max(axis=1, keepdims=True) if thr > 0 else ww > 0
-            last = np.where(on.any(axis=1), t[len(t) - 1 - np.argmax(on[:, ::-1], axis=1)], np.nan)
-            rec[f"W_{name}"].append(np.trapz(ww, t, axis=1)); rec[f"tmax_{name}"].append(last / R)
-        rec["gamma"].append(g)
-    return (lb, gs), {k: np.concatenate(v) for k, v in rec.items()} | dict(R=R)
+def load_decomposition(rebuild=False):
+    """Fig 8: {lb: per-time-step and per-gamma_ij power of the (NB_GS, DEC_NB) case, summed over realizations}."""
+    return {lb: family(lb, rebuild)["dec"] for lb in fam_available()}
 
 
-def build_weight_hists():
+# ----------------------------------------------------------------------------- per-pair spectral power (fig 7, power-weighted)
+def _pair_power_task(args):
+    """Damped surrogate power of every pair of one gamma_*-family realization: integrated over ln k (kR_* = 1-100)
+    and at the peak of the realization's summed spectrum. Same pair order as the weights file (and the fig 7 hist)."""
+    lb, gs, nb, rz = args
+    part = CACHE / "fam_pairpow" / f"lb{LB_TAG[lb]}" / f"gs{gs:02d}_nb{nb:04d}_r{rz:02d}.pkl"
+    if part.exists():
+        return (gs, rz), pickle.load(open(part, "rb"))
+    f, sg, tb, dg = _fam_interp(lb, gs)
+    d = fam_dir(lb, gs, nb, rz)
+    with h5py.File(d / "weights_input.h5") as fh:
+        t = fh["t"][:]; R = float(fh.attrs["R_star"])
+    w, _, _, g = load_weights(d / "weights_output.h5", len(t))
+    wd, td = damp(w, t, g, lb, t_end=tb[1], spacing=R / 150.)
+    C = np.array([_accumulate(f, tb, gg, row, td) for gg, row in zip(g, wd)])        # (n_pairs, N_PLOT)
+    ipk = int(np.argmax(C.sum(axis=0)))
+    out = dict(P_int=np.trapz(C, np.log(X_PLOT), axis=1), P_peak=C[:, ipk], kR_peak=float(X_PLOT[ipk]), gamma=g)
+    part.parent.mkdir(parents=True, exist_ok=True); pickle.dump(out, open(part, "wb"))
+    return (gs, rz), out
+
+
+def build_pair_power(lb, workers=8):
+    """{gamma_*: pooled per-pair damped power over the N_REAL realizations of the gamma_* family}."""
     from multiprocessing import Pool
-    with Pool(8) as pool:
-        return dict(pool.map(_hist_task, [(lb, gs) for gs in GAMMA_STARS[::-1] for lb in (0.84, 0.069)]))
+    res = {}
+    with Pool(workers) as pool:
+        for key, out in pool.imap_unordered(_pair_power_task, [(lb, gs, FAM_NB, rz) for gs in FAM_GS[::-1] for rz in range(N_REAL)]):
+            res[key] = out
+    return {gs: {k: np.concatenate([res[(gs, rz)][k] for rz in range(N_REAL)]) for k in ("P_int", "P_peak", "gamma")}
+            for gs in FAM_GS}
 
 
-# ----------------------------------------------------------------------------- spectral decomposition (fig 8)
-N_PLOT, X_PLOT = 200, np.geomspace(1., 100., 200)
-NB_ROOT = {0.84: DATA / "n_b_family_lb0p84_gstar20_ens16", 0.069: DATA / "n_b_family_lb0p069_gstar20_ens16"}
-SCAN20 = {0.84: DATA / "runtime_scan_lb0.84_gs1-20_kR1-100_nw32", 0.069: DATA / "runtime_scan_lb0.069_gs1-20_kR1-100_nw32"}
-_DEC = {}
+def pair_power(lb, rebuild=False):
+    return cached(f"fam_pairpow_lb{LB_TAG[lb]}", lambda: build_pair_power(lb), rebuild)
 
 
-def _dec_setup(lb):
-    """Notebook 23/25's (gamma_ij, t) cube interpolator on k = X_PLOT / R_* for the gamma_*=20, N_b=512 case."""
-    from scipy.interpolate import interp1d, RegularGridInterpolator
-    sc = load_scan(SCAN20[lb]); sg = np.array([r.gamma_ij for r in sc.rows])
-    with h5py.File(NB_ROOT[lb] / "n_b_0512" / "realization_00" / "weights_input.h5") as f: R = float(f.attrs["R_star"]); L = float(f.attrs["L"])
-    k_out = X_PLOT / R; NT = max(len(r.times) for r in sc.rows); tc = np.linspace(0., sc.t_max, NT)
-    spec = [np.array([np.interp(k_out, r.wlist, r.spectrum[i], left=0., right=0.) for i in range(len(r.times))]) for r in sc.rows]
-    floor = max(s.max() for s in spec) * 1e-12; lf = np.log(floor); cube = np.empty((len(sc.rows), NT, N_PLOT))
-    for ir, (r, s) in enumerate(zip(sc.rows, spec)):
-        ls = np.log(np.maximum(s, floor)); cube[ir] = interp1d(r.times, ls, axis=0, bounds_error=False, fill_value=(lf, ls[-1]))(tc)
-    rgi = RegularGridInterpolator((sg, tc), cube, bounds_error=False, fill_value=lf)
-    f = lambda pts: np.exp(rgi(np.column_stack([np.clip(pts[:, 0], sg.min(), sg.max()), pts[:, 1]])))
-    return dict(f=f, sg=sg, tb=np.array([min(r.times[0] for r in sc.rows), sc.t_max]), R=R, L=L, dg=float(np.diff(sg).mean()))
+# ----------------------------------------------------------------------------- surrogate for the Cutting et al. 2020 setup (comparison figure)
+CUT_GS, CUT_NB, CUT_T, CUT_NREAL = 4, 512, 4.0, 16   # their Fig. 10(d): gamma_* = 4, N_b = 512, t/R_* = 4
 
 
-def _dec_task(args):
-    """One realization: per-time-step and per-gamma_ij contributions of every pair to the reconstructed spectrum
-    (notebook 25's exact-index accumulation), with D^3.6-damped weights."""
+def _cutting_task(args):
+    """Damped surrogate spectrum at t = CUT_T R_* for one random placement of CUT_NB bubbles at gamma_* = CUT_GS."""
     lb, rz = args
-    if lb not in _DEC: _DEC[lb] = _dec_setup(lb)
-    S = _DEC[lb]; rdir = NB_ROOT[lb] / "n_b_0512" / f"realization_{rz:02d}"
-    with h5py.File(rdir / "weights_input.h5") as f: t = f["t"][:]
-    w, _, _, g = load_weights(rdir / "weights_output.h5", len(t)); wd, _ = damp(w, t, g, lb)
-    edges_g = np.arange(S["sg"].min() - S["dg"] / 2, 60.0, S["dg"])
-    h_t = np.zeros((len(t) - 1, N_PLOT)); h_g = np.zeros((len(edges_g) - 1, N_PLOT)); spec = np.zeros(N_PLOT)
-    t_hi = min(t[-1], S["tb"][1])
-    for wr, gg in zip(wd, g):
-        nz = np.where(wr > 0)[0]
-        if len(nz) == 0: continue
-        lo, hi = nz[0], min(nz[-1] + 2, len(t)); tw, ww = t[lo:hi], wr[lo:hi]
-        msk = (tw >= S["tb"][0]) & (tw <= t_hi); tcmp, wcmp = tw[msk], ww[msk]; lo_eff = lo + (np.argmax(msk) if msk.any() else 0)
-        app = len(tcmp) == 0 or tcmp[-1] < t_hi
-        if app: tcmp = np.append(tcmp, t_hi); wcmp = np.append(wcmp, np.interp(t_hi, t, wr))
-        if len(tcmp) < 2: continue
-        sp = S["f"](np.column_stack([np.full(len(tcmp), float(gg)), tcmp])); wt = wcmp[:-1, None] * np.diff(sp, axis=0)
-        spec += wt.sum(axis=0); n_clean = len(wt) - 1 if app else len(wt)
-        np.add.at(h_t, np.arange(lo_eff, lo_eff + n_clean), wt[:n_clean])
-        gb = int(np.digitize([gg], edges_g)[0]) - 1
-        if 0 <= gb < len(edges_g) - 1: h_g[gb] += wt.sum(axis=0)
-    return lb, h_t, h_g, spec, t, edges_g
+    part = CACHE / "cutting_parts" / f"lb{LB_TAG[lb]}_r{rz:02d}.pkl"
+    if part.exists():
+        return rz, pickle.load(open(part, "rb"))
+    _fam_weights_task((lb, CUT_GS, CUT_NB, rz))
+    f, sg, tb, dg = _fam_interp(lb, CUT_GS)
+    d = fam_dir(lb, CUT_GS, CUT_NB, rz)
+    with h5py.File(d / "weights_input.h5") as fh:
+        t = fh["t"][:]; R = float(fh.attrs["R_star"]); L = float(fh.attrs["L"])
+    w, _, _, g = load_weights(d / "weights_output.h5", len(t))
+    T = min(CUT_T * R, tb[1])
+    wd, td = damp(w, t, g, lb, t_end=T, spacing=R / 150.)
+    tbT = np.array([tb[0], T])
+    out = dict(R=R, L=L, T=T, damped=sum(_accumulate(f, tbT, gg, row, td) for gg, row in zip(g, wd)))
+    part.parent.mkdir(parents=True, exist_ok=True); pickle.dump(out, open(part, "wb"))
+    return rz, out
 
 
-def build_decomposition():
+def build_cutting_surrogate(lb, workers=8):
     from multiprocessing import Pool
-    acc = {}
-    with Pool(8) as pool:
-        for lb, h_t, h_g, spec, t, eg in pool.imap_unordered(_dec_task, [(lb, rz) for lb in (0.84, 0.069) for rz in range(16)]):
-            a = acc.setdefault(lb, dict(h_t=0., h_g=0., spec=[], t=t, edges_g=eg))
-            a["h_t"] = a["h_t"] + h_t; a["h_g"] = a["h_g"] + h_g; a["spec"].append(spec)
-    for lb, a in acc.items():
-        with h5py.File(NB_ROOT[lb] / "n_b_0512" / "realization_00" / "weights_input.h5") as f: a["R"] = float(f.attrs["R_star"]); a["L"] = float(f.attrs["L"])
-        a["n_real"] = len(a["spec"]); a["spec"] = np.array(a["spec"])
-    return acc
+    with Pool(workers) as pool:
+        res = dict(pool.map(_cutting_task, [(lb, rz) for rz in range(CUT_NREAL)]))
+    ens = np.array([to_chw(res[rz]["damped"], res[rz]["R"], lb, res[rz]["L"]**3) for rz in range(CUT_NREAL)])
+    return dict(kR=X_PLOT, ens=ens, T_over_R=res[0]["T"] / res[0]["R"])
+
+
+def cutting_surrogate(lb, rebuild=False):
+    return cached(f"cutting_surr_lb{LB_TAG[lb]}", lambda: build_cutting_surrogate(lb), rebuild)
+
+
+# ----------------------------------------------------------------------------- weights figure: undamped and damped W_ij(t) of three example cases
+def build_weights_examples(many_ic, fam_case):
+    """W_ij(t) raw and damped (as in the damped spectra) for the N_b=3 run (0.84), one N_b>3 lattice run and one family case."""
+    c = N23[0.84]; _, wb = c["trio"]
+    with h5py.File(DATA / f"weights_in_{wb}.h5") as f:
+        t = f["t"][:]
+    w, _, _, g = load_weights(DATA / f"weights_out_{wb}_rnum.h5", len(t))
+    R = float(np.mean([_pair_sep(c, i, j) for (i, j), _, _ in c["pairs"]]))
+    wd, td = damp(w, t, g, 0.84)
+    out = dict(n3=dict(t=t, w=w, g=g, R=R, td=td, wd=wd))
+    r = [r for r in NMANY if r["ic"] == many_ic][0]
+    w, t, g, t_ext = nmany_weights(r); R = run_meta(r)["R"]
+    wd, td = damp(w, t, g, r["lb"], t_end=t_ext, spacing=(R / 150. if t_ext else None))
+    out["many"] = dict(t=t, w=w, g=g, R=R, td=td, wd=wd)
+    lb, gs, nb, rz = fam_case; d = fam_dir(lb, gs, nb, rz)
+    with h5py.File(d / "weights_input.h5") as f:
+        t = f["t"][:]; R = float(f.attrs["R_star"])
+    w, _, _, g = load_weights(d / "weights_output.h5", len(t))
+    t_max = (_FAM_SCAN.get(lb) or _FAM_SCAN.setdefault(lb, load_scan(DATA / FAM_SCANS[lb]))).t_max
+    wd, td = damp(w, t, g, lb, t_end=t_max, spacing=R / 150.)
+    out["fam"] = dict(t=t, w=w, g=g, R=R, td=td, wd=wd)
+    return out
+
+
+def weights_examples(many_ic, fam_case, rebuild=False):
+    lb, gs, nb, rz = fam_case
+    return cached(f"weights_examples_{many_ic}_lb{LB_TAG[lb]}_gs{gs}_nb{nb}_r{rz}",
+                  lambda: build_weights_examples(many_ic, fam_case), rebuild)
