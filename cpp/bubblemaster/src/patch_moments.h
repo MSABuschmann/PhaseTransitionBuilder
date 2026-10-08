@@ -8,7 +8,7 @@
 #include "wall_radius.h"
 
 // ---------------------------------------------------------------------------
-// Patch-fraction calibration moments.
+// Patch-fraction calibration moments (bubblemaster --patch-moments).
 //
 // For each native snapshot, the zero-spatial-frequency column moments of the
 // collision wake window |z| < z_cut(s) = 4*delta_c + max(s - s_c, 0):

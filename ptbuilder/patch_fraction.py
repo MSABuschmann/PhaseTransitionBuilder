@@ -4,7 +4,7 @@ Measured patch-fraction damping of pair weights.
 Optional post-processing of each pair's scalar collision weight w(t) before
 it enters reconstruct_pair_spectrum: whenever part of the weight is lost at
 time u, that part keeps contributing F((t - u)/d_pair)**alpha, where F is a
-measured patch-fraction table (gamma=4 calibration, one per lambda_bar).
+measured patch-fraction table (one per lambda_bar, optionally per gamma_ij).
 
 response/load_response/effective_weights implement the damping
 prescription. The reconstruction itself (signed left-endpoint power

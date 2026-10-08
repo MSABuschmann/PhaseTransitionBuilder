@@ -1,4 +1,4 @@
-"""Tests for ptbuilder.patch_fraction (python -m unittest -v tests.test_patch_fraction)."""
+"""Unit tests for ptbuilder.patch_fraction (run with python -m pytest tests)."""
 from pathlib import Path
 import unittest
 import numpy as np
