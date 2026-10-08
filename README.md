@@ -1,19 +1,22 @@
 # PhaseTransitionBuilder
 
-Python/C++ code for predicting the gravitational-wave spectrum of a first-order vacuum phase transition by
-building it up from individual two-bubble collisions:
+Python/C++ implementation of the pairwise surrogate for gravitational-wave spectra from vacuum first-order
+phase transitions. The surrogate separates the microscopic collision dynamics from the geometry of the
+multi-bubble transition:
 
-1. **Pair spectra.** `bubblemaster` simulates the collision of two bubbles in 1+1D and computes its
-   gravitational-wave spectrum as a function of time. A scan covers a grid of collision Lorentz factors
-   $\gamma_{ij}$ (CPU and GPU versions).
-2. **Geometric weights.** For a 3D population of bubbles, `weights` computes, for every colliding pair
-   (including periodic images), the fraction $\mathcal W_{ij}(t)$ of its collision surface that is not inside
-   any other bubble.
-3. **Surrogate spectrum.** The spectrum of the full transition is the sum of the pair spectra, interpolated in
-   $\gamma_{ij}$ and weighted by $\mathcal W_{ij}(t)$, optionally with a damping of the weights calibrated on 1+1D
-   runs.
+1. **Pair library.** `bubblemaster` evolves an isolated two-bubble collision with the symmetry-reduced
+   $(1+1)$-dimensional scalar equation and computes its gravitational-wave spectrum from numerical radiation
+   integrals with a finite-duration cutoff, for a sequence of cutoff times. A scan over the collision boost
+   $\gamma_{\rm coll}$ builds a reusable library of pair spectra (CPU and GPU versions).
+2. **Geometric weights.** For a configuration of simultaneously nucleated bubbles, `weights` computes for every
+   colliding pair (including periodic images) the screening weight $\mathcal W_{ij}(t)$: the fraction of the
+   circumference of its collision circle that lies outside all other bubble interiors.
+3. **Surrogate spectrum.** The many-bubble spectrum is the incoherent sum over pairs of the changes in each
+   pair spectrum between successive times, weighted by $\mathcal W_{ij}(t)$. Screening is either instantaneous
+   or gradual, with a decay kernel $\widehat D^{\,c}$ built from the gradient relaxation measured in two-bubble
+   simulations.
 
-The surrogate is validated against 3D lattice simulations with
+The reduced calculation and the surrogate are tested against full $(3+1)$-dimensional lattice simulations with
 [sledgehamr](https://github.com/MSABuschmann/sledgehamr).
 
 If you use this code, please cite: *[paper reference, arXiv number]*.
@@ -22,11 +25,11 @@ If you use this code, please cite: *[paper reference, arXiv number]*.
 
 | Path | Contents |
 |---|---|
-| `ptbuilder/` | Python package: potentials and instantons, scan setup, weights I/O, spectrum reconstruction, damping |
-| `cpp/bubblemaster/` | 1+1D pair evolution and gravitational-wave integrals (`bubblemaster`, `bubblemaster_filon`, `bubblemaster_gpu`) |
-| `cpp/weights/` | Geometric collision weights |
+| `ptbuilder/` | Python package: potentials and instantons, scan setup, weights I/O, surrogate reconstruction, gradual screening |
+| `cpp/bubblemaster/` | Reduced $(1+1)$-dimensional pair evolution and radiation integrals (`bubblemaster`, `bubblemaster_filon`, `bubblemaster_gpu`) |
+| `cpp/weights/` | Geometric screening weights |
 | `cpp/solver_1d/` | 1D field solver |
-| `notebooks/00_production_scan.ipynb` | Set up a pair-spectrum scan and write its SLURM script |
+| `notebooks/00_production_scan.ipynb` | Set up a pair-library scan and write its SLURM script |
 | `notebooks/01_paper_runs.ipynb` | Set up all scans and dedicated runs used in the paper |
 | `notebooks/02_paper_figures.ipynb` | All paper figures; data from `notebooks/paper_data.py` |
 | `data/` | Scan results, weights, wall-radius tables, damping kernel, extracted literature data, figure caches |
