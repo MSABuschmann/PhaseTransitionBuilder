@@ -74,7 +74,7 @@ Set `REBUILD = True` (or delete a cache file) to recompute from the raw data:
 
 - the $N_b=2$, $N_b=3$ and $N_b>3$ comparisons with the lattice use the data in `data/` and `sledgehamr_runs/`
   (requires `pySledgehamr` and the compiled `weights` binary);
-- the predictions for larger $\gamma_*$ and $N_b$, the weight distributions, the power decomposition, the
+- the predictions for larger $\gamma_* $ and $N_b$, the weight distributions, the power decomposition, the
   comparison with Cutting et al. (2020) and the weights figure additionally need the $\gamma_*=1$–$16$ scans
   and the family weights, which are too large for this repository: *[data archive link]*.
 
