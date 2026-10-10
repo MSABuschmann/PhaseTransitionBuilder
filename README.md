@@ -19,7 +19,9 @@ multi-bubble transition:
 The reduced calculation and the surrogate are tested against full $(3+1)$-dimensional lattice simulations with
 [sledgehamr](https://github.com/MSABuschmann/sledgehamr).
 
-If you use this code, please cite: *[paper reference, arXiv number]*.
+If you use this code, please cite: 
+"A Pairwise Surrogate for Gravitational-Wave Spectra from Highly Relativistic Vacuum Bubble Collisions", M. Buschmann and T. Operkuch, https://arxiv.org/abs/2610.12389 
+
 
 ## Repository layout
 
